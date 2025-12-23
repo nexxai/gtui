@@ -372,8 +372,14 @@ async fn main() -> anyhow::Result<()> {
                             let id = m.id.clone();
                             if let Some(gmail) = &gmail_client {
                                 let gmail = gmail.clone();
+                                let db_url_str = db_url.clone();
                                 tokio::spawn(async move {
-                                    let _ = gmail.trash_message(&id).await;
+                                    if let Err(e) = gmail.trash_message(&id).await {
+                                        eprintln!("Error trashing message: {}", e);
+                                    }
+                                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
+                                        let _ = db_clone.delete_message(&id).await;
+                                    }
                                 });
                             }
                             ui_state.messages.remove(ui_state.selected_message_index);
@@ -389,8 +395,14 @@ async fn main() -> anyhow::Result<()> {
                             let id = m.id.clone();
                             if let Some(gmail) = &gmail_client {
                                 let gmail = gmail.clone();
+                                let db_url_str = db_url.clone();
                                 tokio::spawn(async move {
-                                    let _ = gmail.archive_message(&id).await;
+                                    if let Err(e) = gmail.archive_message(&id).await {
+                                        eprintln!("Error archiving message: {}", e);
+                                    }
+                                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
+                                        let _ = db_clone.remove_label_from_message(&id, "INBOX").await;
+                                    }
                                 });
                             }
                             ui_state.messages.remove(ui_state.selected_message_index);

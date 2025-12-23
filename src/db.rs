@@ -183,4 +183,25 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    pub async fn delete_message(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM message_labels WHERE message_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM messages WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_label_from_message(&self, message_id: &str, label_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM message_labels WHERE message_id = ? AND label_id = ?")
+            .bind(message_id)
+            .bind(label_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }

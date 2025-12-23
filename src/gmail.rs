@@ -123,6 +123,9 @@ impl GmailClient {
     }
 
     pub async fn trash_message(&self, id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Trashing message: {}", id));
+        }
         self.hub
             .users()
             .messages_trash("me", id)
@@ -133,6 +136,9 @@ impl GmailClient {
     }
 
     pub async fn archive_message(&self, id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Archiving message: {}", id));
+        }
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(vec![id.to_string()]),
             remove_label_ids: Some(vec!["INBOX".to_string()]),
@@ -223,6 +229,19 @@ impl GmailClient {
             .await
             .context("Failed to mark message as unread")?;
         Ok(())
+    }
+
+    fn debug_log(&self, msg: &str) {
+        if self.debug_logging {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("gtui_debug.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{}", msg);
+            }
+        }
     }
 }
 
