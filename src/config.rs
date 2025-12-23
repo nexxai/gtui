@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +25,7 @@ pub struct Keybindings {
     pub reply: Vec<String>,
     pub delete: Vec<String>,
     pub archive: Vec<String>,
+    pub send_message: Vec<String>,
     pub quit: Vec<String>,
 }
 
@@ -41,6 +42,7 @@ impl Default for Config {
                 reply: vec!["r".to_string()],
                 delete: vec!["Backspace".to_string(), "d".to_string()],
                 archive: vec!["a".to_string()],
+                send_message: vec!["ctrl-s".to_string()],
                 quit: vec!["q".to_string()],
             },
             signatures: Signatures::default(),
@@ -48,8 +50,25 @@ impl Default for Config {
     }
 }
 
-pub fn parse_key(key: &str) -> KeyCode {
-    match key {
+pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
+    let mut parts: Vec<&str> = key_str.split('-').collect();
+    let mut modifiers = KeyModifiers::empty();
+    
+    // We process from the end to find the base key, then consume prefixes
+    let base_key_str = parts.pop().unwrap_or("");
+    
+    for part in parts {
+        match part.to_lowercase().as_str() {
+            "ctrl" => modifiers.insert(KeyModifiers::CONTROL),
+            "alt" => modifiers.insert(KeyModifiers::ALT),
+            "shift" => modifiers.insert(KeyModifiers::SHIFT),
+            "cmd" | "command" | "super" => modifiers.insert(KeyModifiers::SUPER),
+            "meta" => modifiers.insert(KeyModifiers::META),
+            _ => {},
+        }
+    }
+
+    let code = match base_key_str {
         "Backspace" => KeyCode::Backspace,
         "Enter" => KeyCode::Enter,
         "Left" => KeyCode::Left,
@@ -62,11 +81,16 @@ pub fn parse_key(key: &str) -> KeyCode {
         " " => KeyCode::Char(' '),
         s if s.len() == 1 => KeyCode::Char(s.chars().next().unwrap()),
         _ => KeyCode::Null,
-    }
+    };
+
+    (code, modifiers)
 }
 
-pub fn matches_key(key: KeyCode, bindings: &[String]) -> bool {
-    bindings.iter().any(|b| parse_key(b) == key)
+pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
+    bindings.iter().any(|b| {
+        let (code, modifiers) = parse_key_string(b);
+        event.code == code && event.modifiers.contains(modifiers)
+    })
 }
 
 impl Config {

@@ -262,18 +262,18 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ui::UIMode::Browsing => {
-                    if matches_key(key.code, &config.keybindings.quit) {
+                    if matches_key(key, &config.keybindings.quit) {
                         break;
                     }
 
                     // Panel switching
-                    if matches_key(key.code, &config.keybindings.prev_panel) {
+                    if matches_key(key, &config.keybindings.prev_panel) {
                         ui_state.focused_panel = match ui_state.focused_panel {
                             FocusedPanel::Details => FocusedPanel::Messages,
                             FocusedPanel::Messages => FocusedPanel::Labels,
                             FocusedPanel::Labels => FocusedPanel::Labels,
                         };
-                    } else if matches_key(key.code, &config.keybindings.next_panel) {
+                    } else if matches_key(key, &config.keybindings.next_panel) {
                         ui_state.focused_panel = match ui_state.focused_panel {
                             FocusedPanel::Labels => FocusedPanel::Messages,
                             FocusedPanel::Messages => FocusedPanel::Details,
@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
                         };
                     }
                     // Navigation within panels
-                    else if matches_key(key.code, &config.keybindings.move_down) {
+                    else if matches_key(key, &config.keybindings.move_down) {
                         match ui_state.focused_panel {
                             FocusedPanel::Labels => {
                                 if ui_state.selected_label_index
@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
                                 ui_state.detail_scroll = ui_state.detail_scroll.saturating_add(1);
                             }
                         }
-                    } else if matches_key(key.code, &config.keybindings.move_up) {
+                    } else if matches_key(key, &config.keybindings.move_up) {
                         match ui_state.focused_panel {
                             FocusedPanel::Labels => {
                                 if ui_state.selected_label_index > 0 {
@@ -377,7 +377,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     // Email Actions
-                    else if matches_key(key.code, &config.keybindings.mark_read) {
+                    else if matches_key(key, &config.keybindings.mark_read) {
                         // Toggle Read/Unread
                         if let Some(m) = ui_state.messages.get_mut(ui_state.selected_message_index)
                         {
@@ -401,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
                                 });
                             }
                         }
-                    } else if matches_key(key.code, &config.keybindings.reply) {
+                    } else if matches_key(key, &config.keybindings.reply) {
                         // Reply
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let subject = m.subject.as_deref().unwrap_or("");
@@ -452,7 +452,7 @@ async fn main() -> anyhow::Result<()> {
                                     show_cc_bcc: false,
                                 });
                             }
-                        } else if matches_key(key.code, &config.keybindings.new_message) {
+                        } else if matches_key(key, &config.keybindings.new_message) {
                             // New message
                             ui_state.mode = ui::UIMode::Composing;
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);
@@ -474,7 +474,7 @@ async fn main() -> anyhow::Result<()> {
                                 cursor_index: 0,
                                 show_cc_bcc: false,
                             });
-                    } else if matches_key(key.code, &config.keybindings.delete) {
+                    } else if matches_key(key, &config.keybindings.delete) {
                         // Delete
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let id = m.id.clone();
@@ -497,7 +497,7 @@ async fn main() -> anyhow::Result<()> {
                                 ui_state.selected_message_index = ui_state.messages.len() - 1;
                             }
                         }
-                    } else if matches_key(key.code, &config.keybindings.archive) {
+                    } else if matches_key(key, &config.keybindings.archive) {
                         // Archive
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let id = m.id.clone();
@@ -529,11 +529,7 @@ async fn main() -> anyhow::Result<()> {
                         let _ = execute!(io::stdout(), crossterm::cursor::Hide);
                         ui_state.compose_state = None;
                     }
-                    KeyCode::Char('s')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                    {
+                    _ if matches_key(key, &config.keybindings.send_message) => {
                         if let Some(cs) = &ui_state.compose_state {
                             if let Some(gmail) = &gmail_client {
                                 let (to, cc, bcc, sub, body) = (
