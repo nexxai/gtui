@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub keybindings: Keybindings,
+    #[serde(default)]
+    pub signatures: Signatures,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Signatures {
+    pub new_message: Option<String>,
+    pub reply: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +43,7 @@ impl Default for Config {
                 archive: vec!["a".to_string()],
                 quit: vec!["q".to_string()],
             },
+            signatures: Signatures::default(),
         }
     }
 }

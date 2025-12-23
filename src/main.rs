@@ -26,6 +26,13 @@ async fn main() -> anyhow::Result<()> {
     let db = db::Database::new(db_url).await?;
     db.run_migrations().await?;
 
+    // Handle token reset
+    if std::env::args().any(|arg| arg == "--reset-token") {
+        auth::RingStorage.clear_token().await?;
+        println!("Token cleared. Please restart without --reset-token to re-authenticate.");
+        return Ok(());
+    }
+
     // Initial Auth
     let secret = auth::Authenticator::load_secret("credentials.json").await?;
     let auth = auth::Authenticator::authenticate(secret).await?;
@@ -42,7 +49,8 @@ async fn main() -> anyhow::Result<()> {
         auth,
     );
 
-    let gmail_client = GmailClient::new(hub);
+    let debug_logging = std::env::args().any(|arg| arg == "--debug");
+    let gmail_client = GmailClient::new(hub, debug_logging);
     let sync_client = gmail_client.clone();
     let sync_db = db::Database::new(db_url).await?;
 
@@ -243,19 +251,23 @@ async fn main() -> anyhow::Result<()> {
                     }
                     // Email Actions
                     else if matches_key(key.code, &config.keybindings.mark_read) {
-                        // Mark as read
+                        // Toggle Read/Unread
                         if let Some(m) = ui_state.messages.get_mut(ui_state.selected_message_index)
                         {
-                            if !m.is_read {
-                                m.is_read = true;
-                                let id = m.id.clone();
-                                let gmail = gmail_client.clone();
-                                let db_clone = db::Database::new(db_url).await?;
-                                tokio::spawn(async move {
+                            let is_currently_read = m.is_read;
+                            m.is_read = !is_currently_read;
+                            let id = m.id.clone();
+                            let gmail = gmail_client.clone();
+                            let db_clone = db::Database::new(db_url).await?;
+                            let new_status = !is_currently_read;
+                            tokio::spawn(async move {
+                                if new_status {
                                     let _ = gmail.mark_as_read(&id).await;
-                                    let _ = db_clone.mark_message_as_read(&id, true).await;
-                                });
-                            }
+                                } else {
+                                    let _ = gmail.mark_as_unread(&id).await;
+                                }
+                                let _ = db_clone.mark_message_as_read(&id, new_status).await;
+                            });
                         }
                     } else if matches_key(key.code, &config.keybindings.reply) {
                         // Reply
@@ -286,12 +298,18 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
+                            let mut final_body = format!("\n\n{}", quoted_body);
+                            if let Some(sig) = &config.signatures.reply {
+                                final_body.push_str("\n\n--\n");
+                                final_body.push_str(sig);
+                            }
+
                             ui_state.mode = ui::UIMode::Composing;
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);
                             ui_state.compose_state = Some(ui::ComposeState {
                                 to: m.from_address.clone().unwrap_or_default(),
                                 subject: new_subject,
-                                body: format!("\n\n{}", quoted_body),
+                                body: final_body,
                                 focused_field: ui::ComposeField::Body,
                                 cursor_index: 0,
                             });
@@ -300,10 +318,17 @@ async fn main() -> anyhow::Result<()> {
                         // New message
                         ui_state.mode = ui::UIMode::Composing;
                         let _ = execute!(io::stdout(), crossterm::cursor::Show);
+
+                        let mut body = String::new();
+                        if let Some(sig) = &config.signatures.new_message {
+                            body.push_str("\n\n--\n");
+                            body.push_str(sig);
+                        }
+
                         ui_state.compose_state = Some(ui::ComposeState {
                             to: "".to_string(),
                             subject: "".to_string(),
-                            body: "".to_string(),
+                            body,
                             focused_field: ui::ComposeField::To,
                             cursor_index: 0,
                         });

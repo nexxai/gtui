@@ -14,6 +14,12 @@ use yup_oauth2::storage::{TokenInfo, TokenStorage};
 const APP_NAME: &str = "gtui";
 const TOKEN_KEY: &str = "gmail_token";
 
+pub const SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
+];
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TokenData {
     tokens: Vec<TokenInfo>,
@@ -61,6 +67,16 @@ impl RingStorage {
             Err(e) => Err(anyhow::anyhow!("Keyring error: {}", e)),
         }
     }
+
+    pub async fn clear_token(&self) -> Result<()> {
+        let entry =
+            Entry::new(APP_NAME, TOKEN_KEY).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        match entry.delete_password() {
+            Ok(_) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("Keyring error: {}", e)),
+        }
+    }
 }
 
 pub struct Authenticator;
@@ -85,6 +101,9 @@ impl Authenticator {
                 .build()
                 .await
                 .context("Failed to build authenticator")?;
+
+        // Pre-fetch token with required scopes to ensure they are requested
+        let _ = auth.token(SCOPES).await.context("Failed to get initial token with required scopes")?;
 
         Ok(auth)
     }

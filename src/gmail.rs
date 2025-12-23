@@ -7,11 +7,12 @@ use hyper_rustls::HttpsConnector;
 #[derive(Clone)]
 pub struct GmailClient {
     hub: Gmail<HttpsConnector<HttpConnector>>,
+    debug_logging: bool,
 }
 
 impl GmailClient {
-    pub fn new(hub: Gmail<HttpsConnector<HttpConnector>>) -> Self {
-        Self { hub }
+    pub fn new(hub: Gmail<HttpsConnector<HttpConnector>>, debug_logging: bool) -> Self {
+        Self { hub, debug_logging }
     }
 
     pub async fn list_labels(&self) -> Result<Vec<models::Label>> {
@@ -147,24 +148,49 @@ impl GmailClient {
     }
 
     pub async fn send_message(&self, to: &str, subject: &str, body: &str) -> Result<()> {
-        let raw_message = format!("To: {}\r\nSubject: {}\r\n\r\n{}", to, subject, body);
-        use base64::{Engine as _, engine::general_purpose};
-        let encoded = general_purpose::URL_SAFE_NO_PAD.encode(raw_message);
+        let raw_message = format!(
+            "From: me\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{}",
+            to, subject, body
+        );
 
-        let msg = google_gmail1::api::Message {
-            ..Default::default()
-        };
+        // Logging for troubleshooting
+        if self.debug_logging {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("gtui_debug.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "--- SEND ATTEMPT ---");
+                let _ = writeln!(file, "To: {}", to);
+                let _ = writeln!(file, "Subject: {}", subject);
+                let _ = writeln!(file, "Raw Message Body Length: {}", body.len());
+            }
+        }
 
         use std::io::Cursor;
-        let cursor = Cursor::new(encoded);
+        let cursor = Cursor::new(raw_message.into_bytes());
 
-        let _ = self
-            .hub
+        let result = self.hub
             .users()
-            .messages_send(msg, "me")
+            .messages_send(google_gmail1::api::Message::default(), "me")
             .upload(cursor, "message/rfc822".parse().unwrap())
-            .await
-            .context("Failed to send message")?;
+            .await;
+
+        if self.debug_logging {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .append(true)
+                .open("gtui_debug.log")
+            {
+                use std::io::Write;
+                match &result {
+                    Ok(_) => { let _ = writeln!(file, "Result: SUCCESS"); }
+                    Err(e) => { let _ = writeln!(file, "Result: ERROR: {:?}", e); }
+                }
+            }
+        }
+
+        result.context("Failed to send message")?;
 
         Ok(())
     }
@@ -181,6 +207,21 @@ impl GmailClient {
             .doit()
             .await
             .context("Failed to mark message as read")?;
+        Ok(())
+    }
+
+    pub async fn mark_as_unread(&self, id: &str) -> Result<()> {
+        let req = google_gmail1::api::BatchModifyMessagesRequest {
+            ids: Some(vec![id.to_string()]),
+            remove_label_ids: None,
+            add_label_ids: Some(vec!["UNREAD".to_string()]),
+        };
+        self.hub
+            .users()
+            .messages_batch_modify(req, "me")
+            .doit()
+            .await
+            .context("Failed to mark message as unread")?;
         Ok(())
     }
 }
