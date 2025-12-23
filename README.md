@@ -53,6 +53,22 @@ next_panel = ["l", "Right", "Tab"]
 mark_read = [" ", "x"]
 ```
 
+### Signatures
+
+You can set automatic signatures for new messages and replies:
+
+```toml
+[signatures]
+new_message = """
+--
+Sent from gtui"""
+
+reply = """
+
+Best,
+Your Name"""
+```
+
 ## Features
 
 -   **Thread Grouping**: Messages are grouped by thread ID in the list, showing one entry per conversation.
