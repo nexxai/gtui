@@ -435,32 +435,38 @@ async fn main() -> anyhow::Result<()> {
 
                             ui_state.mode = ui::UIMode::Composing;
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);
+                                ui_state.compose_state = Some(ui::ComposeState {
+                                    to: m.from_address.clone().unwrap_or_default(),
+                                    cc: "".to_string(),
+                                    bcc: "".to_string(),
+                                    subject: new_subject,
+                                    body: final_body,
+                                    focused_field: ui::ComposeField::Body,
+                                    cursor_index: 0,
+                                    show_cc_bcc: false,
+                                });
+                            }
+                        } else if matches_key(key.code, &config.keybindings.new_message) {
+                            // New message
+                            ui_state.mode = ui::UIMode::Composing;
+                            let _ = execute!(io::stdout(), crossterm::cursor::Show);
+
+                            let mut body = String::new();
+                            if let Some(sig) = &config.signatures.new_message {
+                                body.push_str("\n\n--\n");
+                                body.push_str(sig);
+                            }
+
                             ui_state.compose_state = Some(ui::ComposeState {
-                                to: m.from_address.clone().unwrap_or_default(),
-                                subject: new_subject,
-                                body: final_body,
-                                focused_field: ui::ComposeField::Body,
+                                to: "".to_string(),
+                                cc: "".to_string(),
+                                bcc: "".to_string(),
+                                subject: "".to_string(),
+                                body,
+                                focused_field: ui::ComposeField::To,
                                 cursor_index: 0,
+                                show_cc_bcc: false,
                             });
-                        }
-                    } else if matches_key(key.code, &config.keybindings.new_message) {
-                        // New message
-                        ui_state.mode = ui::UIMode::Composing;
-                        let _ = execute!(io::stdout(), crossterm::cursor::Show);
-
-                        let mut body = String::new();
-                        if let Some(sig) = &config.signatures.new_message {
-                            body.push_str("\n\n--\n");
-                            body.push_str(sig);
-                        }
-
-                        ui_state.compose_state = Some(ui::ComposeState {
-                            to: "".to_string(),
-                            subject: "".to_string(),
-                            body,
-                            focused_field: ui::ComposeField::To,
-                            cursor_index: 0,
-                        });
                     } else if matches_key(key.code, &config.keybindings.delete) {
                         // Delete
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
@@ -523,11 +529,16 @@ async fn main() -> anyhow::Result<()> {
                     {
                         if let Some(cs) = &ui_state.compose_state {
                             if let Some(gmail) = &gmail_client {
-                                let (to, sub, body) =
-                                    (cs.to.clone(), cs.subject.clone(), cs.body.clone());
+                                let (to, cc, bcc, sub, body) = (
+                                    cs.to.clone(),
+                                    cs.cc.clone(),
+                                    cs.bcc.clone(),
+                                    cs.subject.clone(),
+                                    cs.body.clone(),
+                                );
                                 let gmail = gmail.clone();
                                 tokio::spawn(async move {
-                                    let _ = gmail.send_message(&to, &sub, &body).await;
+                                    let _ = gmail.send_message(&to, &cc, &bcc, &sub, &body).await;
                                 });
                             }
                         }
@@ -535,21 +546,46 @@ async fn main() -> anyhow::Result<()> {
                         let _ = execute!(io::stdout(), crossterm::cursor::Hide);
                         ui_state.compose_state = None;
                     }
+                    KeyCode::Char('b')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(cs) = &mut ui_state.compose_state {
+                            cs.show_cc_bcc = !cs.show_cc_bcc;
+                        }
+                    }
                     KeyCode::Tab => {
                         if let Some(cs) = &mut ui_state.compose_state {
                             cs.focused_field = match cs.focused_field {
-                                ui::ComposeField::To => ui::ComposeField::Subject,
+                                ui::ComposeField::To => {
+                                    if cs.show_cc_bcc {
+                                        ui::ComposeField::Cc
+                                    } else {
+                                        ui::ComposeField::Subject
+                                    }
+                                }
+                                ui::ComposeField::Cc => ui::ComposeField::Bcc,
+                                ui::ComposeField::Bcc => ui::ComposeField::Subject,
                                 ui::ComposeField::Subject => ui::ComposeField::Body,
                                 ui::ComposeField::Body => ui::ComposeField::To,
                             };
-                            cs.cursor_index = 0; // Or keep track of separate cursors
+                            cs.cursor_index = 0;
                         }
                     }
                     KeyCode::BackTab => {
                         if let Some(cs) = &mut ui_state.compose_state {
                             cs.focused_field = match cs.focused_field {
                                 ui::ComposeField::To => ui::ComposeField::Body,
-                                ui::ComposeField::Subject => ui::ComposeField::To,
+                                ui::ComposeField::Cc => ui::ComposeField::To,
+                                ui::ComposeField::Bcc => ui::ComposeField::Cc,
+                                ui::ComposeField::Subject => {
+                                    if cs.show_cc_bcc {
+                                        ui::ComposeField::Bcc
+                                    } else {
+                                        ui::ComposeField::To
+                                    }
+                                }
                                 ui::ComposeField::Body => ui::ComposeField::Subject,
                             };
                             cs.cursor_index = 0;
@@ -559,6 +595,8 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(cs) = &mut ui_state.compose_state {
                             let field = match cs.focused_field {
                                 ui::ComposeField::To => &mut cs.to,
+                                ui::ComposeField::Cc => &mut cs.cc,
+                                ui::ComposeField::Bcc => &mut cs.bcc,
                                 ui::ComposeField::Subject => &mut cs.subject,
                                 ui::ComposeField::Body => &mut cs.body,
                             };
@@ -572,6 +610,8 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(cs) = &mut ui_state.compose_state {
                             let field = match cs.focused_field {
                                 ui::ComposeField::To => &mut cs.to,
+                                ui::ComposeField::Cc => &mut cs.cc,
+                                ui::ComposeField::Bcc => &mut cs.bcc,
                                 ui::ComposeField::Subject => &mut cs.subject,
                                 ui::ComposeField::Body => &mut cs.body,
                             };
@@ -589,9 +629,17 @@ async fn main() -> anyhow::Result<()> {
                                     cs.cursor_index += 1;
                                 }
                                 _ => {
-                                    // Tab to next field on Enter for non-body
+                                    // Tab logic
                                     cs.focused_field = match cs.focused_field {
-                                        ui::ComposeField::To => ui::ComposeField::Subject,
+                                        ui::ComposeField::To => {
+                                            if cs.show_cc_bcc {
+                                                ui::ComposeField::Cc
+                                            } else {
+                                                ui::ComposeField::Subject
+                                            }
+                                        }
+                                        ui::ComposeField::Cc => ui::ComposeField::Bcc,
+                                        ui::ComposeField::Bcc => ui::ComposeField::Subject,
                                         ui::ComposeField::Subject => ui::ComposeField::Body,
                                         _ => ui::ComposeField::Body,
                                     };
@@ -611,6 +659,8 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(cs) = &mut ui_state.compose_state {
                             let field_len = match cs.focused_field {
                                 ui::ComposeField::To => cs.to.len(),
+                                ui::ComposeField::Cc => cs.cc.len(),
+                                ui::ComposeField::Bcc => cs.bcc.len(),
                                 ui::ComposeField::Subject => cs.subject.len(),
                                 ui::ComposeField::Body => cs.body.len(),
                             };

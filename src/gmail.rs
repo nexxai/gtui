@@ -153,11 +153,30 @@ impl GmailClient {
         Ok(())
     }
 
-    pub async fn send_message(&self, to: &str, subject: &str, body: &str) -> Result<()> {
-        let raw_message = format!(
-            "From: me\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{}",
-            to, subject, body
-        );
+    pub async fn send_message(
+        &self,
+        to: &str,
+        cc: &str,
+        bcc: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<()> {
+        let mut headers = vec![
+            format!("From: me"),
+            format!("To: {}", to),
+            format!("Subject: {}", subject),
+        ];
+
+        if !cc.is_empty() {
+            headers.push(format!("Cc: {}", cc));
+        }
+        if !bcc.is_empty() {
+            headers.push(format!("Bcc: {}", bcc));
+        }
+
+        headers.push(format!("Content-Type: text/plain; charset=\"UTF-8\""));
+
+        let raw_message = format!("{}\r\n\r\n{}", headers.join("\r\n"), body);
 
         // Logging for troubleshooting
         if self.debug_logging {

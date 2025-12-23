@@ -74,8 +74,9 @@ Your Name"""
 -   **Thread Grouping**: Messages are grouped by thread ID in the list, showing one entry per conversation.
 -   **Reverse Chronological Sorting**: Most recent threads and messages appear at the top.
 -   **Full-Width Layout**: Enhanced UI with bordered blocks for clarity.
--   **Popup Composition**: Compose and reply in a focused centered overlay.
--   **Automated Quoting**: Replies automatically include the original thread context.
+-   **Popup Composition**: Compose and reply in a focused centered overlay (the **Composition Panel**).
+-   **CC/BCC Support**: Use `Ctrl+B` while composing to toggle optional CC and BCC fields.
+-   **Automated Quoting**: Replies automatically include the full body of the original message.
 -   **Background Sync**: Keeps your local cache updated with the latest emails.
 
 ## Troubleshooting

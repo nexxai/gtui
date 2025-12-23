@@ -25,16 +25,21 @@ pub enum UIMode {
 pub enum ComposeField {
     #[default]
     To,
+    Cc,
+    Bcc,
     Subject,
     Body,
 }
 
 pub struct ComposeState {
     pub to: String,
+    pub cc: String,
+    pub bcc: String,
     pub subject: String,
     pub body: String,
     pub focused_field: ComposeField,
     pub cursor_index: usize,
+    pub show_cc_bcc: bool,
 }
 
 pub struct UIState {
@@ -230,14 +235,22 @@ pub fn render(f: &mut Frame, state: &UIState) {
             let area = centered_rect(80, 80, f.size());
             f.render_widget(Clear, area);
 
+            let mut constraints = vec![
+                Constraint::Length(3), // To
+            ];
+            if cs.show_cc_bcc {
+                constraints.push(Constraint::Length(3)); // Cc
+                constraints.push(Constraint::Length(3)); // Bcc
+            }
+            constraints.push(Constraint::Length(3)); // Subject
+            constraints.push(Constraint::Min(10));   // Body
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3), // To
-                    Constraint::Length(3), // Subject
-                    Constraint::Min(10),   // Body
-                ])
+                .constraints(constraints)
                 .split(area);
+
+            let mut current_chunk = 0;
 
             let to_block = Block::default()
                 .borders(Borders::ALL)
@@ -250,7 +263,38 @@ pub fn render(f: &mut Frame, state: &UIState) {
                     Style::default().fg(Color::Gray)
                 });
             let to_paragraph = Paragraph::new(cs.to.as_str()).block(to_block);
-            f.render_widget(to_paragraph, chunks[0]);
+            f.render_widget(to_paragraph, chunks[current_chunk]);
+            current_chunk += 1;
+
+            if cs.show_cc_bcc {
+                let cc_block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Cc ")
+                    .border_style(if cs.focused_field == ComposeField::Cc {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    });
+                let cc_paragraph = Paragraph::new(cs.cc.as_str()).block(cc_block);
+                f.render_widget(cc_paragraph, chunks[current_chunk]);
+                current_chunk += 1;
+
+                let bcc_block = Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Bcc ")
+                    .border_style(if cs.focused_field == ComposeField::Bcc {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    });
+                let bcc_paragraph = Paragraph::new(cs.bcc.as_str()).block(bcc_block);
+                f.render_widget(bcc_paragraph, chunks[current_chunk]);
+                current_chunk += 1;
+            }
 
             let sub_block = Block::default()
                 .borders(Borders::ALL)
@@ -263,11 +307,19 @@ pub fn render(f: &mut Frame, state: &UIState) {
                     Style::default().fg(Color::Gray)
                 });
             let sub_paragraph = Paragraph::new(cs.subject.as_str()).block(sub_block);
-            f.render_widget(sub_paragraph, chunks[1]);
+            f.render_widget(sub_paragraph, chunks[current_chunk]);
+            let sub_chunk_idx = current_chunk;
+            current_chunk += 1;
+
+            let body_title = if cs.show_cc_bcc {
+                " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Hide CC/BCC] "
+            } else {
+                " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
+            };
 
             let body_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch] ")
+                .title(body_title)
                 .border_style(if cs.focused_field == ComposeField::Body {
                     Style::default()
                         .fg(Color::Cyan)
@@ -278,13 +330,20 @@ pub fn render(f: &mut Frame, state: &UIState) {
             let body_paragraph = Paragraph::new(cs.body.as_str())
                 .block(body_block)
                 .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(body_paragraph, chunks[2]);
+            f.render_widget(body_paragraph, chunks[current_chunk]);
+            let body_chunk_idx = current_chunk;
 
             // Set cursor position based on focused field
             let (cursor_x, cursor_y) = match cs.focused_field {
                 ComposeField::To => (chunks[0].x + 1 + cs.cursor_index as u16, chunks[0].y + 1),
-                ComposeField::Subject => {
+                ComposeField::Cc => {
                     (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1)
+                }
+                ComposeField::Bcc => {
+                    (chunks[2].x + 1 + cs.cursor_index as u16, chunks[2].y + 1)
+                }
+                ComposeField::Subject => {
+                    (chunks[sub_chunk_idx].x + 1 + cs.cursor_index as u16, chunks[sub_chunk_idx].y + 1)
                 }
                 ComposeField::Body => {
                     let mut x = 0;
@@ -300,7 +359,7 @@ pub fn render(f: &mut Frame, state: &UIState) {
                             x += 1;
                         }
                     }
-                    (chunks[2].x + 1 + x as u16, chunks[2].y + 1 + y as u16)
+                    (chunks[body_chunk_idx].x + 1 + x as u16, chunks[body_chunk_idx].y + 1 + y as u16)
                 }
             };
             f.set_cursor(cursor_x, cursor_y);
