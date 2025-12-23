@@ -99,6 +99,11 @@ impl GmailClient {
             }
         }
 
+        let mut body_plain = None;
+        if let Some(payload) = &msg.payload {
+            body_plain = extract_text_body(payload, "text/plain");
+        }
+
         Ok(models::Message {
             id: msg.id.unwrap_or_default(),
             thread_id: msg.thread_id.unwrap_or_default(),
@@ -107,7 +112,7 @@ impl GmailClient {
             to_address: to,
             subject,
             internal_date,
-            body_plain: None,
+            body_plain,
             body_html: None,
             is_read: !msg
                 .label_ids
@@ -178,4 +183,45 @@ impl GmailClient {
             .context("Failed to mark message as read")?;
         Ok(())
     }
+}
+
+fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Option<String> {
+    if let Some(mime) = &part.mime_type {
+        if mime == mime_type {
+            if let Some(body) = &part.body {
+                if let Some(data) = &body.data {
+                    use base64::{engine::general_purpose, Engine as _};
+                    let data_str = String::from_utf8_lossy(data);
+                    
+                    // Try decoding as base64url (Gmail's default)
+                    let decoded = general_purpose::URL_SAFE_NO_PAD.decode(data_str.trim().replace('-', "+").replace('_', "/"))
+                        .or_else(|_| general_purpose::URL_SAFE.decode(data_str.trim().replace('-', "+").replace('_', "/")))
+                        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
+                        .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
+
+                    match decoded {
+                        Ok(bytes) => return String::from_utf8(bytes).ok(),
+                        Err(_) => {
+                            // If base64 decoding fails, it might already be raw content
+                            return String::from_utf8(data.clone()).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(parts) = &part.parts {
+        let mut full_body = String::new();
+        for p in parts {
+            if let Some(body) = extract_text_body(p, mime_type) {
+                full_body.push_str(&body);
+            }
+        }
+        if !full_body.is_empty() {
+            return Some(full_body);
+        }
+    }
+
+    None
 }

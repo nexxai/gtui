@@ -46,7 +46,7 @@ impl Default for UIState {
             threaded_messages: Vec::new(),
             selected_label_index: 0,
             selected_message_index: 0,
-            focused_panel: FocusedPanel::Labels,
+            focused_panel: FocusedPanel::Messages,
             mode: UIMode::Browsing,
             compose_state: None,
         }
@@ -190,7 +190,7 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 "From: {}\nDate: {}\n\n{}\n",
                 sender,
                 time_str,
-                msg.snippet.as_deref().unwrap_or("")
+                msg.body_plain.as_deref().unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
             ));
             detail_content
                 .push_str("\n------------------------------------------------------------\n\n");
