@@ -10,6 +10,9 @@ use yup_oauth2::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use yup_oauth2::storage::{TokenInfo, TokenStorage};
+use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
+use std::pin::Pin;
+use std::future::Future;
 
 const APP_NAME: &str = "gtui";
 const TOKEN_KEY: &str = "gmail_token";
@@ -79,6 +82,27 @@ impl RingStorage {
     }
 }
 
+pub struct TuiDelegate {
+    pub tx: tokio::sync::mpsc::Sender<String>,
+}
+
+impl InstalledFlowDelegate for TuiDelegate {
+    fn present_user_url<'a>(
+        &'a self,
+        url: &'a str,
+        _need_code: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+        let url = url.to_string();
+        let tx = self.tx.clone();
+        Box::pin(async move {
+            let _ = tx.send(url.clone()).await;
+            // Automatically try to open the browser
+            let _ = open::that(&url);
+            Ok(String::new())
+        })
+    }
+}
+
 pub struct Authenticator;
 
 impl Authenticator {
@@ -90,20 +114,20 @@ impl Authenticator {
 
     pub async fn authenticate(
         secret: ApplicationSecret,
+        delegate: TuiDelegate,
     ) -> Result<
         oauth2::authenticator::Authenticator<
             hyper_rustls::HttpsConnector<hyper::client::HttpConnector>,
         >,
-    > {
+    > 
+    {
         let auth =
             InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
                 .with_storage(Box::new(RingStorage))
+                .flow_delegate(Box::new(delegate))
                 .build()
                 .await
                 .context("Failed to build authenticator")?;
-
-        // Pre-fetch token with required scopes to ensure they are requested
-        let _ = auth.token(SCOPES).await.context("Failed to get initial token with required scopes")?;
 
         Ok(auth)
     }

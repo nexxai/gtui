@@ -22,8 +22,9 @@ use std::io;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load();
-    let db_url = "sqlite:gtui.db?mode=rwc";
-    let db = db::Database::new(db_url).await?;
+    let debug_logging = std::env::args().any(|arg| arg == "--debug");
+    let db_url = "sqlite:gtui.db?mode=rwc".to_string();
+    let db = db::Database::new(&db_url).await?;
     db.run_migrations().await?;
 
     // Handle token reset
@@ -33,75 +34,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Initial Auth
-    let secret = auth::Authenticator::load_secret("credentials.json").await?;
-    let auth = auth::Authenticator::authenticate(secret).await?;
-
-    let hub = Gmail::new(
-        hyper::Client::builder().build(
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_native_roots()
-                .expect("Failed to load native roots")
-                .https_only()
-                .enable_http1()
-                .build(),
-        ),
-        auth,
-    );
-
-    let debug_logging = std::env::args().any(|arg| arg == "--debug");
-    let gmail_client = GmailClient::new(hub, debug_logging);
-    let sync_client = gmail_client.clone();
-    let sync_db = db::Database::new(db_url).await?;
-
-    let mut ui_state = ui::UIState::default();
-    let mut current_offset = 0;
-    let limit = 50;
-
-    // Background Sync Task
-    tokio::spawn(async move {
-        loop {
-            if let Ok(l) = sync_client.list_labels().await {
-                let _ = sync_db.upsert_labels(&l).await;
-            }
-
-            for label_id in &["INBOX", "SENT"] {
-                if let Ok((ids, _)) = sync_client
-                    .list_messages(vec![label_id.to_string()], 100, None)
-                    .await
-                {
-                    let mut messages = Vec::new();
-                    for id in ids {
-                        if let Ok(msg) = sync_client.get_message(&id).await {
-                            messages.push(msg);
-                        }
-                    }
-                    let _ = sync_db.upsert_messages(&messages, label_id).await;
-                }
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
-    });
-
-    // Initial Sync
-    let labels = gmail_client.list_labels().await?;
-    db.upsert_labels(&labels).await?;
-
-    for label_id in &["INBOX", "SENT"] {
-        let (message_ids, _) = gmail_client
-            .list_messages(vec![label_id.to_string()], 20, None)
-            .await?;
-        let mut messages = Vec::new();
-        for id in message_ids {
-            if let Ok(msg) = gmail_client.get_message(&id).await {
-                messages.push(msg);
-            }
-        }
-        db.upsert_messages(&messages, label_id).await?;
-    }
-
-    // Setup terminal
+    // Setup terminal early
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -112,28 +45,125 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Load initial data for UI
-    ui_state.labels = db.get_labels().await?;
+    let mut ui_state = ui::UIState::default();
 
-    // Select INBOX by default
-    if let Some(index) = ui_state.labels.iter().position(|l| l.id == "INBOX") {
-        ui_state.selected_label_index = index;
-    }
+    // Initial Auth setup
+    let secret = auth::Authenticator::load_secret("credentials.json").await?;
+    
+    use tokio::sync::mpsc;
+    let (tx, mut rx) = mpsc::channel::<String>(1);
+    let (done_tx, mut done_rx) = mpsc::channel::<bool>(1);
 
-    if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-        ui_state.messages = db
-            .get_messages_by_label(&label.id, limit, current_offset)
-            .await?;
-        if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-            ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+    let auth_builder = auth::Authenticator::authenticate(secret, auth::TuiDelegate {
+        tx,
+    }).await?;
+
+    let auth_clone = auth_builder.clone();
+    tokio::spawn(async move {
+        if let Ok(_) = auth_clone.token(auth::SCOPES).await {
+            let _ = done_tx.send(true).await;
         }
-    }
+    });
+
+    let mut authenticated = false;
+    let mut current_offset = 0;
+    let limit = 50;
+    
+    // We'll hold these in Options until authenticated
+    let mut gmail_client: Option<GmailClient> = None;
 
     loop {
+        // Check for auth messages
+        while let Ok(url) = rx.try_recv() {
+            ui_state.auth_url = Some(url);
+            ui_state.mode = ui::UIMode::Authentication;
+        }
+        
+        if !authenticated {
+            if let Ok(true) = done_rx.try_recv() {
+                authenticated = true;
+                ui_state.mode = ui::UIMode::Browsing;
+                ui_state.auth_url = None;
+
+                // Now create the hub and client
+                let hub = Gmail::new(
+                    hyper::Client::builder().build(
+                        hyper_rustls::HttpsConnectorBuilder::new()
+                            .with_native_roots()
+                            .expect("Failed to load native roots")
+                            .https_only()
+                            .enable_http1()
+                            .build(),
+                    ),
+                    auth_builder.clone(),
+                );
+                
+                let client = GmailClient::new(hub, debug_logging);
+                gmail_client = Some(client.clone());
+
+                // Kick off sync
+                let sync_client = client.clone();
+                let sync_db_url = db_url.clone();
+                tokio::spawn(async move {
+                    if let Ok(sync_db) = db::Database::new(&sync_db_url).await {
+                        loop {
+                            if let Ok(l) = sync_client.list_labels().await {
+                                let _ = sync_db.upsert_labels(&l).await;
+                            }
+
+                            for label_id in &["INBOX", "SENT"] {
+                                if let Ok((ids, _)) = sync_client
+                                    .list_messages(vec![label_id.to_string()], 100, None)
+                                    .await
+                                {
+                                    let mut messages = Vec::new();
+                                    for id in ids {
+                                        if let Ok(msg) = sync_client.get_message(&id).await {
+                                            messages.push(msg);
+                                        }
+                                    }
+                                    let _ = sync_db.upsert_messages(&messages, label_id).await;
+                                }
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                        }
+                    }
+                });
+
+                // Load initial data for UI
+                ui_state.labels = db.get_labels().await?;
+                if let Some(index) = ui_state.labels.iter().position(|l| l.id == "INBOX") {
+                    ui_state.selected_label_index = index;
+                }
+                if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
+                    ui_state.messages = db
+                        .get_messages_by_label(&label.id, limit, current_offset)
+                        .await?;
+                    if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                    }
+                }
+            }
+        }
+
         terminal.draw(|f| ui::render(f, &ui_state))?;
 
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+
         if let Event::Key(key) = event::read()? {
+            // Only handle keys if authenticated or to quit
+            if !authenticated && key.code != KeyCode::Char('q') {
+                continue;
+            }
+
             match ui_state.mode {
+                ui::UIMode::Authentication => {
+                    if key.code == KeyCode::Char('q') {
+                        break;
+                    }
+                }
                 ui::UIMode::Browsing => {
                     if matches_key(key.code, &config.keybindings.quit) {
                         break;
@@ -257,17 +287,21 @@ async fn main() -> anyhow::Result<()> {
                             let is_currently_read = m.is_read;
                             m.is_read = !is_currently_read;
                             let id = m.id.clone();
-                            let gmail = gmail_client.clone();
-                            let db_clone = db::Database::new(db_url).await?;
-                            let new_status = !is_currently_read;
-                            tokio::spawn(async move {
-                                if new_status {
-                                    let _ = gmail.mark_as_read(&id).await;
-                                } else {
-                                    let _ = gmail.mark_as_unread(&id).await;
-                                }
-                                let _ = db_clone.mark_message_as_read(&id, new_status).await;
-                            });
+                            if let Some(gmail) = &gmail_client {
+                                let gmail = gmail.clone();
+                                let db_url_str = db_url.clone();
+                                let new_status = !is_currently_read;
+                                tokio::spawn(async move {
+                                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
+                                        if new_status {
+                                            let _ = gmail.mark_as_read(&id).await;
+                                        } else {
+                                            let _ = gmail.mark_as_unread(&id).await;
+                                        }
+                                        let _ = db_clone.mark_message_as_read(&id, new_status).await;
+                                    }
+                                });
+                            }
                         }
                     } else if matches_key(key.code, &config.keybindings.reply) {
                         // Reply
@@ -336,10 +370,12 @@ async fn main() -> anyhow::Result<()> {
                         // Delete
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let id = m.id.clone();
-                            let gmail = gmail_client.clone();
-                            tokio::spawn(async move {
-                                let _ = gmail.trash_message(&id).await;
-                            });
+                            if let Some(gmail) = &gmail_client {
+                                let gmail = gmail.clone();
+                                tokio::spawn(async move {
+                                    let _ = gmail.trash_message(&id).await;
+                                });
+                            }
                             ui_state.messages.remove(ui_state.selected_message_index);
                             if ui_state.selected_message_index >= ui_state.messages.len()
                                 && !ui_state.messages.is_empty()
@@ -351,10 +387,12 @@ async fn main() -> anyhow::Result<()> {
                         // Archive
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let id = m.id.clone();
-                            let gmail = gmail_client.clone();
-                            tokio::spawn(async move {
-                                let _ = gmail.archive_message(&id).await;
-                            });
+                            if let Some(gmail) = &gmail_client {
+                                let gmail = gmail.clone();
+                                tokio::spawn(async move {
+                                    let _ = gmail.archive_message(&id).await;
+                                });
+                            }
                             ui_state.messages.remove(ui_state.selected_message_index);
                             if ui_state.selected_message_index >= ui_state.messages.len()
                                 && !ui_state.messages.is_empty()
@@ -376,12 +414,14 @@ async fn main() -> anyhow::Result<()> {
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         if let Some(cs) = &ui_state.compose_state {
-                            let gmail = gmail_client.clone();
+                        if let Some(gmail) = &gmail_client {
                             let (to, sub, body) =
                                 (cs.to.clone(), cs.subject.clone(), cs.body.clone());
+                            let gmail = gmail.clone();
                             tokio::spawn(async move {
                                 let _ = gmail.send_message(&to, &sub, &body).await;
                             });
+                        }
                         }
                         ui_state.mode = ui::UIMode::Browsing;
                         let _ = execute!(io::stdout(), crossterm::cursor::Hide);

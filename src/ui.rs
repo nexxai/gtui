@@ -18,6 +18,7 @@ pub enum FocusedPanel {
 pub enum UIMode {
     Browsing,
     Composing,
+    Authentication,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
@@ -46,6 +47,7 @@ pub struct UIState {
     pub focused_panel: FocusedPanel,
     pub mode: UIMode,
     pub compose_state: Option<ComposeState>,
+    pub auth_url: Option<String>,
 }
 
 impl Default for UIState {
@@ -60,11 +62,17 @@ impl Default for UIState {
             focused_panel: FocusedPanel::Messages,
             mode: UIMode::Browsing,
             compose_state: None,
+            auth_url: None,
         }
     }
 }
 
 pub fn render(f: &mut Frame, state: &UIState) {
+    if let UIMode::Authentication = state.mode {
+        render_authentication(f, state);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -288,6 +296,47 @@ pub fn render(f: &mut Frame, state: &UIState) {
             f.set_cursor(cursor_x, cursor_y);
         }
     }
+}
+
+fn render_authentication(f: &mut Frame, state: &UIState) {
+    let area = centered_rect(60, 40, f.size());
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Authentication Required ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(6), // Increased for potential wrapping
+            Constraint::Length(4),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let msg = Paragraph::new("To access your Gmail account, please visit the following URL in your browser and authorize the application:")
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(msg, chunks[0]);
+
+    if let Some(url) = &state.auth_url {
+        let url_p = Paragraph::new(url.as_str())
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED))
+            .block(Block::default().borders(Borders::ALL).title(" URL "))
+            .wrap(ratatui::widgets::Wrap { trim: false }); // Wrap the URL!
+        f.render_widget(url_p, chunks[1]);
+    }
+
+    let footer = Paragraph::new("Your default browser should have opened automatically. If not, please copy the URL above (Tip: Hold Shift to select in most terminals).\n\nThe application will proceed automatically once complete.")
+        .style(Style::default().fg(Color::Gray))
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(footer, chunks[2]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
