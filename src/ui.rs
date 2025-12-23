@@ -20,10 +20,19 @@ pub enum UIMode {
     Composing,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ComposeField {
+    #[default]
+    To,
+    Subject,
+    Body,
+}
+
 pub struct ComposeState {
     pub to: String,
     pub subject: String,
     pub body: String,
+    pub focused_field: ComposeField,
     pub cursor_index: usize,
 }
 
@@ -209,26 +218,62 @@ pub fn render(f: &mut Frame, state: &UIState) {
     if let UIMode::Composing = state.mode {
         if let Some(cs) = &state.compose_state {
             let area = centered_rect(80, 80, f.size());
-            f.render_widget(Clear, area); // This clears the background for the popup
+            f.render_widget(Clear, area);
 
-            let compose_text = format!("To: {}\nSubject: {}\n\n{}", cs.to, cs.subject, cs.body);
-            let compose_paragraph = Paragraph::new(compose_text)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Compose Message [Esc to Cancel, Ctrl-S to Send] ")
-                        .border_style(Style::default().fg(Color::Cyan)),
-                )
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // To
+                    Constraint::Length(3), // Subject
+                    Constraint::Min(10),   // Body
+                ])
+                .split(area);
+
+            let to_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" To ")
+                .border_style(if cs.focused_field == ComposeField::To {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                });
+            let to_paragraph = Paragraph::new(cs.to.as_str()).block(to_block);
+            f.render_widget(to_paragraph, chunks[0]);
+
+            let sub_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Subject ")
+                .border_style(if cs.focused_field == ComposeField::Subject {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                });
+            let sub_paragraph = Paragraph::new(cs.subject.as_str()).block(sub_block);
+            f.render_widget(sub_paragraph, chunks[1]);
+
+            let body_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch] ")
+                .border_style(if cs.focused_field == ComposeField::Body {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                });
+            let body_paragraph = Paragraph::new(cs.body.as_str())
+                .block(body_block)
                 .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(compose_paragraph, area);
+            f.render_widget(body_paragraph, chunks[2]);
 
-            // Set cursor position. This is a simple estimation.
-            // For a better implementation, we'd need to account for wrapping.
-            // But for a centered popup, we'll just place it at the start of the body area for now.
-            // Subject/To are fixed in this demo's UI text block.
-            // "To: ...\nSubject: ...\n\n" is 3 lines.
-            let cursor_x = area.x + 1;
-            let cursor_y = area.y + 1 + 3; // After To and Subject lines
+            // Set cursor position based on focused field
+            let (cursor_x, cursor_y) = match cs.focused_field {
+                ComposeField::To => (chunks[0].x + 1 + cs.cursor_index as u16, chunks[0].y + 1),
+                ComposeField::Subject => (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1),
+                ComposeField::Body => {
+                    // Very simple cursor placement for body (doesn't handle wrapping)
+                    (chunks[2].x + 1 + (cs.cursor_index as u16 % chunks[2].width.saturating_sub(2)), 
+                     chunks[2].y + 1 + (cs.cursor_index as u16 / chunks[2].width.saturating_sub(2)))
+                }
+            };
             f.set_cursor(cursor_x, cursor_y);
         }
     }

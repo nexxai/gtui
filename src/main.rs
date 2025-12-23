@@ -292,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
                                 to: m.from_address.clone().unwrap_or_default(),
                                 subject: new_subject,
                                 body: format!("\n\n{}", quoted_body),
+                                focused_field: ui::ComposeField::Body,
                                 cursor_index: 0,
                             });
                         }
@@ -303,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
                             to: "".to_string(),
                             subject: "".to_string(),
                             body: "".to_string(),
+                            focused_field: ui::ComposeField::To,
                             cursor_index: 0,
                         });
                     } else if matches_key(key.code, &config.keybindings.delete) {
@@ -360,24 +362,69 @@ async fn main() -> anyhow::Result<()> {
                         let _ = execute!(io::stdout(), crossterm::cursor::Hide);
                         ui_state.compose_state = None;
                     }
+                    KeyCode::Tab => {
+                        if let Some(cs) = &mut ui_state.compose_state {
+                            cs.focused_field = match cs.focused_field {
+                                ui::ComposeField::To => ui::ComposeField::Subject,
+                                ui::ComposeField::Subject => ui::ComposeField::Body,
+                                ui::ComposeField::Body => ui::ComposeField::To,
+                            };
+                            cs.cursor_index = 0; // Or keep track of separate cursors
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        if let Some(cs) = &mut ui_state.compose_state {
+                            cs.focused_field = match cs.focused_field {
+                                ui::ComposeField::To => ui::ComposeField::Body,
+                                ui::ComposeField::Subject => ui::ComposeField::To,
+                                ui::ComposeField::Body => ui::ComposeField::Subject,
+                            };
+                            cs.cursor_index = 0;
+                        }
+                    }
                     KeyCode::Char(c) => {
                         if let Some(cs) = &mut ui_state.compose_state {
-                            cs.body.insert(cs.cursor_index, c);
-                            cs.cursor_index += 1;
+                            let field = match cs.focused_field {
+                                ui::ComposeField::To => &mut cs.to,
+                                ui::ComposeField::Subject => &mut cs.subject,
+                                ui::ComposeField::Body => &mut cs.body,
+                            };
+                            if cs.cursor_index <= field.len() {
+                                field.insert(cs.cursor_index, c);
+                                cs.cursor_index += 1;
+                            }
                         }
                     }
                     KeyCode::Backspace => {
                         if let Some(cs) = &mut ui_state.compose_state {
+                            let field = match cs.focused_field {
+                                ui::ComposeField::To => &mut cs.to,
+                                ui::ComposeField::Subject => &mut cs.subject,
+                                ui::ComposeField::Body => &mut cs.body,
+                            };
                             if cs.cursor_index > 0 {
-                                cs.body.remove(cs.cursor_index - 1);
+                                field.remove(cs.cursor_index - 1);
                                 cs.cursor_index -= 1;
                             }
                         }
                     }
                     KeyCode::Enter => {
                         if let Some(cs) = &mut ui_state.compose_state {
-                            cs.body.insert(cs.cursor_index, '\n');
-                            cs.cursor_index += 1;
+                            match cs.focused_field {
+                                ui::ComposeField::Body => {
+                                    cs.body.insert(cs.cursor_index, '\n');
+                                    cs.cursor_index += 1;
+                                }
+                                _ => {
+                                    // Tab to next field on Enter for non-body
+                                    cs.focused_field = match cs.focused_field {
+                                        ui::ComposeField::To => ui::ComposeField::Subject,
+                                        ui::ComposeField::Subject => ui::ComposeField::Body,
+                                        _ => ui::ComposeField::Body,
+                                    };
+                                    cs.cursor_index = 0;
+                                }
+                            }
                         }
                     }
                     KeyCode::Left => {
@@ -389,7 +436,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                     KeyCode::Right => {
                         if let Some(cs) = &mut ui_state.compose_state {
-                            if cs.cursor_index < cs.body.len() {
+                            let field_len = match cs.focused_field {
+                                ui::ComposeField::To => cs.to.len(),
+                                ui::ComposeField::Subject => cs.subject.len(),
+                                ui::ComposeField::Body => cs.body.len(),
+                            };
+                            if cs.cursor_index < field_len {
                                 cs.cursor_index += 1;
                             }
                         }
