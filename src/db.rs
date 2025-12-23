@@ -17,24 +17,27 @@ impl Database {
             "SELECT id, thread_id, snippet, from_address, to_address, subject, internal_date, body_plain, body_html, is_read 
              FROM messages 
              WHERE thread_id = ?
-             ORDER BY internal_date ASC"
+             ORDER BY internal_date DESC"
         )
         .bind(thread_id)
         .fetch_all(&self.pool)
         .await?;
 
-        let messages = rows.into_iter().map(|row| models::Message {
-            id: row.get(0),
-            thread_id: row.get(1),
-            snippet: row.get(2),
-            from_address: row.get(3),
-            to_address: row.get(4),
-            subject: row.get(5),
-            internal_date: row.get(6),
-            body_plain: row.get(7),
-            body_html: row.get(8),
-            is_read: row.get(9),
-        }).collect();
+        let messages = rows
+            .into_iter()
+            .map(|row| models::Message {
+                id: row.get(0),
+                thread_id: row.get(1),
+                snippet: row.get(2),
+                from_address: row.get(3),
+                to_address: row.get(4),
+                subject: row.get(5),
+                internal_date: row.get(6),
+                body_plain: row.get(7),
+                body_html: row.get(8),
+                is_read: row.get(9),
+            })
+            .collect();
 
         Ok(messages)
     }
@@ -138,11 +141,12 @@ impl Database {
         offset: i64,
     ) -> Result<Vec<models::Message>> {
         let rows = sqlx::query(
-            "SELECT m.id, m.thread_id, m.snippet, m.from_address, m.to_address, m.subject, m.internal_date, m.body_plain, m.body_html, m.is_read 
+            "SELECT m.id, m.thread_id, m.snippet, m.from_address, m.to_address, m.subject, MAX(m.internal_date) as latest_date, m.body_plain, m.body_html, m.is_read 
              FROM messages m
              JOIN message_labels ml ON m.id = ml.message_id
              WHERE ml.label_id = ?
-             ORDER BY m.internal_date DESC
+             GROUP BY m.thread_id
+             ORDER BY latest_date DESC
              LIMIT ? OFFSET ?"
         )
         .bind(label_id)

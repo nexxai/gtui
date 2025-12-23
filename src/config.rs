@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use crossterm::event::KeyCode;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {

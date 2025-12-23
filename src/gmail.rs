@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
+use crate::models;
+use anyhow::{Context, Result};
 use google_gmail1::Gmail;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
-use crate::models;
 
 #[derive(Clone)]
 pub struct GmailClient {
@@ -15,13 +15,17 @@ impl GmailClient {
     }
 
     pub async fn list_labels(&self) -> Result<Vec<models::Label>> {
-        let (_, label_list) = self.hub.users()
+        let (_, label_list) = self
+            .hub
+            .users()
             .labels_list("me")
             .doit()
             .await
             .context("Failed to list labels")?;
 
-        let labels = label_list.labels.unwrap_or_default()
+        let labels = label_list
+            .labels
+            .unwrap_or_default()
             .into_iter()
             .map(|l| models::Label {
                 id: l.id.unwrap_or_default(),
@@ -35,20 +39,31 @@ impl GmailClient {
         Ok(labels)
     }
 
-    pub async fn list_messages(&self, label_ids: Vec<String>, max_results: u32, page_token: Option<String>) -> Result<(Vec<String>, Option<String>)> {
-        let mut req = self.hub.users().messages_list("me").max_results(max_results);
-        
+    pub async fn list_messages(
+        &self,
+        label_ids: Vec<String>,
+        max_results: u32,
+        page_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        let mut req = self
+            .hub
+            .users()
+            .messages_list("me")
+            .max_results(max_results);
+
         for label_id in &label_ids {
             req = req.add_label_ids(label_id);
         }
-        
+
         if let Some(token) = &page_token {
             req = req.page_token(token);
         }
 
         let (_, message_list) = req.doit().await.context("Failed to list messages")?;
-        
-        let ids = message_list.messages.unwrap_or_default()
+
+        let ids = message_list
+            .messages
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|m| m.id)
             .collect();
@@ -57,7 +72,10 @@ impl GmailClient {
     }
 
     pub async fn get_message(&self, id: &str) -> Result<models::Message> {
-        let (_, msg) = self.hub.users().messages_get("me", id)
+        let (_, msg) = self
+            .hub
+            .users()
+            .messages_get("me", id)
             .format("full")
             .doit()
             .await
@@ -91,12 +109,17 @@ impl GmailClient {
             internal_date,
             body_plain: None,
             body_html: None,
-            is_read: !msg.label_ids.unwrap_or_default().contains(&"UNREAD".to_string()),
+            is_read: !msg
+                .label_ids
+                .unwrap_or_default()
+                .contains(&"UNREAD".to_string()),
         })
     }
 
     pub async fn trash_message(&self, id: &str) -> Result<()> {
-        self.hub.users().messages_trash("me", id)
+        self.hub
+            .users()
+            .messages_trash("me", id)
             .doit()
             .await
             .context("Failed to trash message")?;
@@ -109,7 +132,9 @@ impl GmailClient {
             remove_label_ids: Some(vec!["INBOX".to_string()]),
             add_label_ids: None,
         };
-        self.hub.users().messages_batch_modify(req, "me")
+        self.hub
+            .users()
+            .messages_batch_modify(req, "me")
             .doit()
             .await
             .context("Failed to archive message")?;
@@ -117,13 +142,10 @@ impl GmailClient {
     }
 
     pub async fn send_message(&self, to: &str, subject: &str, body: &str) -> Result<()> {
-        let raw_message = format!(
-            "To: {}\r\nSubject: {}\r\n\r\n{}",
-            to, subject, body
-        );
+        let raw_message = format!("To: {}\r\nSubject: {}\r\n\r\n{}", to, subject, body);
         use base64::{Engine as _, engine::general_purpose};
         let encoded = general_purpose::URL_SAFE_NO_PAD.encode(raw_message);
-        
+
         let msg = google_gmail1::api::Message {
             ..Default::default()
         };
@@ -131,11 +153,14 @@ impl GmailClient {
         use std::io::Cursor;
         let cursor = Cursor::new(encoded);
 
-        let _ = self.hub.users().messages_send(msg, "me")
+        let _ = self
+            .hub
+            .users()
+            .messages_send(msg, "me")
             .upload(cursor, "message/rfc822".parse().unwrap())
             .await
             .context("Failed to send message")?;
-        
+
         Ok(())
     }
 
@@ -145,7 +170,9 @@ impl GmailClient {
             remove_label_ids: Some(vec!["UNREAD".to_string()]),
             add_label_ids: None,
         };
-        self.hub.users().messages_batch_modify(req, "me")
+        self.hub
+            .users()
+            .messages_batch_modify(req, "me")
             .doit()
             .await
             .context("Failed to mark message as read")?;

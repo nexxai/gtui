@@ -1,11 +1,11 @@
-use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Clear},
-    Frame,
-};
 use crate::models;
 use chrono::{DateTime, Local};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FocusedPanel {
@@ -24,6 +24,7 @@ pub struct ComposeState {
     pub to: String,
     pub subject: String,
     pub body: String,
+    pub cursor_index: usize,
 }
 
 pub struct UIState {
@@ -63,11 +64,15 @@ pub fn render(f: &mut Frame, state: &UIState) {
         .split(f.size());
 
     // Panel 1: Labels
-    let items: Vec<ListItem> = state.labels.iter()
+    let items: Vec<ListItem> = state
+        .labels
+        .iter()
         .enumerate()
         .map(|(i, l)| {
             let style = if i == state.selected_label_index {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
@@ -79,7 +84,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
         .borders(Borders::ALL)
         .title("Labels")
         .border_style(if state.focused_panel == FocusedPanel::Labels {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         });
@@ -90,12 +97,17 @@ pub fn render(f: &mut Frame, state: &UIState) {
     f.render_widget(labels_list, chunks[0]);
 
     // Panel 2: Message List
-    let msg_items: Vec<ListItem> = state.messages.iter()
+    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    let border_line = "─".repeat(list_width.saturating_sub(2));
+
+    let msg_items: Vec<ListItem> = state
+        .messages
+        .iter()
         .enumerate()
         .map(|(i, m)| {
             let sender = m.from_address.as_deref().unwrap_or("Unknown");
             let subject = m.subject.as_deref().unwrap_or("(No Subject)");
-            
+
             let date = DateTime::from_timestamp_millis(m.internal_date)
                 .unwrap_or_default()
                 .with_timezone(&Local);
@@ -106,15 +118,33 @@ pub fn render(f: &mut Frame, state: &UIState) {
             } else {
                 Style::default()
             };
-            
+
             if !m.is_read {
                 style = style.add_modifier(Modifier::BOLD);
             }
 
-            let content = format!(" {}\n {}\n {}", time_str, sender, subject);
-            
-            // We use vertical bars and dashes to simulate a rectangle/block within the ListItem
-            let item_text = format!("┌────────────────────────────┐\n{}\n└────────────────────────────┘", content);
+            // Truncate to fit if necessary (crude)
+            let s_label = format!(" Sender: {}", sender);
+            let t_label = format!(" Time:   {}", time_str);
+            let sub_label = format!(" Sub:    {}", subject);
+
+            let pad = |s: String, len: usize| {
+                if s.len() > len {
+                    format!("{}...", &s[..len.saturating_sub(4)])
+                } else {
+                    format!("{:width$}", s, width = len)
+                }
+            };
+
+            let inner_len = list_width.saturating_sub(2);
+            let line1 = format!("│{}│", pad(s_label, inner_len));
+            let line2 = format!("│{}│", pad(t_label, inner_len));
+            let line3 = format!("│{}│", pad(sub_label, inner_len));
+
+            let item_text = format!(
+                "┌{}┐\n{}\n{}\n{}\n└{}┘",
+                border_line, line1, line2, line3, border_line
+            );
             ListItem::new(item_text).style(style)
         })
         .collect();
@@ -123,7 +153,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
         .borders(Borders::ALL)
         .title("Conversations")
         .border_style(if state.focused_panel == FocusedPanel::Messages {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         });
@@ -136,7 +168,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
         .borders(Borders::ALL)
         .title("Conversation Context")
         .border_style(if state.focused_panel == FocusedPanel::Details {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         });
@@ -151,9 +185,15 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 .unwrap_or_default()
                 .with_timezone(&Local);
             let time_str = date.format("%Y-%m-%d %H:%M").to_string();
-            
-            detail_content.push_str(&format!("From: {}\nDate: {}\n\n{}\n", sender, time_str, msg.snippet.as_deref().unwrap_or("")));
-            detail_content.push_str("\n------------------------------------------------------------\n\n");
+
+            detail_content.push_str(&format!(
+                "From: {}\nDate: {}\n\n{}\n",
+                sender,
+                time_str,
+                msg.snippet.as_deref().unwrap_or("")
+            ));
+            detail_content
+                .push_str("\n------------------------------------------------------------\n\n");
         }
     }
 
@@ -168,17 +208,25 @@ pub fn render(f: &mut Frame, state: &UIState) {
             let area = centered_rect(80, 80, f.size());
             f.render_widget(Clear, area); // This clears the background for the popup
 
-            let compose_text = format!(
-                "To: {}\nSubject: {}\n\n{}",
-                cs.to, cs.subject, cs.body
-            );
+            let compose_text = format!("To: {}\nSubject: {}\n\n{}", cs.to, cs.subject, cs.body);
             let compose_paragraph = Paragraph::new(compose_text)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Compose Message [Esc to Cancel, Ctrl-S to Send] ")
-                    .border_style(Style::default().fg(Color::Cyan)))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Compose Message [Esc to Cancel, Ctrl-S to Send] ")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
                 .wrap(ratatui::widgets::Wrap { trim: true });
             f.render_widget(compose_paragraph, area);
+
+            // Set cursor position. This is a simple estimation.
+            // For a better implementation, we'd need to account for wrapping.
+            // But for a centered popup, we'll just place it at the start of the body area for now.
+            // Subject/To are fixed in this demo's UI text block.
+            // "To: ...\nSubject: ...\n\n" is 3 lines.
+            let cursor_x = area.x + 1;
+            let cursor_y = area.y + 1 + 3; // After To and Subject lines
+            f.set_cursor(cursor_x, cursor_y);
         }
     }
 }
