@@ -10,12 +10,3 @@ delete = ["d"]
 archive = ["Backspace", "a"]
 quit = ["q"]
 
-[signatures]
-new_message = """
-JT Smith"""
-
-reply = """
-
-Best,
-Your Name"""
-

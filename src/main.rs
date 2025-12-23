@@ -100,6 +100,11 @@ async fn main() -> anyhow::Result<()> {
                 let client = GmailClient::new(hub, debug_logging);
                 gmail_client = Some(client.clone());
 
+                // Fetch remote signature
+                if let Ok(Some(sig)) = client.get_signature().await {
+                    ui_state.remote_signature = Some(sig);
+                }
+
                 // Kick off sync
                 let sync_client = client.clone();
                 let sync_db_url = db_url.clone();
@@ -425,7 +430,8 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             let mut signature_part = String::new();
-                            if let Some(sig) = &config.signatures.reply {
+                            let sig_to_use = ui_state.remote_signature.as_ref().or(config.signatures.reply.as_ref());
+                            if let Some(sig) = sig_to_use {
                                 signature_part.push_str("--\n");
                                 signature_part.push_str(sig);
                                 signature_part.push_str("\n\n");
@@ -452,7 +458,8 @@ async fn main() -> anyhow::Result<()> {
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);
 
                             let mut body = String::new();
-                            if let Some(sig) = &config.signatures.new_message {
+                            let sig_to_use = ui_state.remote_signature.as_ref().or(config.signatures.new_message.as_ref());
+                            if let Some(sig) = sig_to_use {
                                 body.push_str("\n\n--\n");
                                 body.push_str(sig);
                             }

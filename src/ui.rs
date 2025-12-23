@@ -53,6 +53,7 @@ pub struct UIState {
     pub mode: UIMode,
     pub compose_state: Option<ComposeState>,
     pub auth_url: Option<String>,
+    pub remote_signature: Option<String>,
 }
 
 impl Default for UIState {
@@ -68,6 +69,7 @@ impl Default for UIState {
             mode: UIMode::Browsing,
             compose_state: None,
             auth_url: None,
+            remote_signature: None,
         }
     }
 }
