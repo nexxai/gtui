@@ -175,6 +175,27 @@ impl Database {
         Ok(messages)
     }
 
+    pub async fn get_messages_with_dates_by_label(
+        &self,
+        label_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT m.id, m.internal_date 
+             FROM messages m
+             JOIN message_labels ml ON m.id = ml.message_id
+             WHERE ml.label_id = ?
+             ORDER BY m.internal_date DESC
+             LIMIT ?"
+        )
+        .bind(label_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
     pub async fn mark_message_as_read(&self, id: &str, is_read: bool) -> Result<()> {
         sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
             .bind(is_read)

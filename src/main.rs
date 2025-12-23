@@ -53,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     use tokio::sync::mpsc;
     let (tx, mut rx) = mpsc::channel::<String>(1);
     let (done_tx, mut done_rx) = mpsc::channel::<bool>(1);
+    let (refresh_tx, mut refresh_rx) = mpsc::channel::<()>(1);
 
     let auth_builder = auth::Authenticator::authenticate(secret, auth::TuiDelegate {
         tx,
@@ -104,11 +105,14 @@ async fn main() -> anyhow::Result<()> {
                 // Kick off sync
                 let sync_client = client.clone();
                 let sync_db_url = db_url.clone();
+                let sync_refresh_tx = refresh_tx.clone();
                 tokio::spawn(async move {
                     if let Ok(sync_db) = db::Database::new(&sync_db_url).await {
                         loop {
+                            let mut has_new_data = false;
                             if let Ok(l) = sync_client.list_labels().await {
                                 let _ = sync_db.upsert_labels(&l).await;
+                                has_new_data = true;
                             }
 
                             for label_id in &["INBOX", "SENT"] {
@@ -117,15 +121,42 @@ async fn main() -> anyhow::Result<()> {
                                     .await
                                 {
                                     let mut messages = Vec::new();
+                                    let mut remote_ids = std::collections::HashSet::new();
+                                    let mut oldest_date = i64::MAX;
+
                                     for id in ids {
                                         if let Ok(msg) = sync_client.get_message(&id).await {
+                                            remote_ids.insert(msg.id.clone());
+                                            oldest_date = oldest_date.min(msg.internal_date);
                                             messages.push(msg);
                                         }
                                     }
+                                    
                                     let _ = sync_db.upsert_messages(&messages, label_id).await;
+                                    if !messages.is_empty() {
+                                        has_new_data = true;
+                                    }
+
+                                    // Detection of removals (archived/deleted from other clients)
+                                    if let Ok(local_info) = sync_db.get_messages_with_dates_by_label(label_id, 100).await {
+                                        for (local_id, local_date) in local_info {
+                                            // If the message is newer than the oldest sync'd message but not in the sync list,
+                                            // it means it was removed from this label.
+                                            if local_date >= oldest_date && !remote_ids.contains(&local_id) {
+                                                if let Ok(_) = sync_db.remove_label_from_message(&local_id, label_id).await {
+                                                    has_new_data = true;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+                            if has_new_data {
+                                let _ = sync_refresh_tx.send(()).await;
+                            }
+
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         }
                     }
                 });
@@ -142,6 +173,22 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
                         ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
                     }
+                }
+            }
+        }
+
+        // Check for sync refresh
+        while let Ok(()) = refresh_rx.try_recv() {
+            // Re-load labels
+            ui_state.labels = db.get_labels().await?;
+            if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
+                // Re-load messages for current label
+                ui_state.messages = db
+                    .get_messages_by_label(&label.id, limit, current_offset)
+                    .await?;
+                // Re-load threaded messages for selected message
+                if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                    ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
                 }
             }
         }
