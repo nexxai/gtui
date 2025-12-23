@@ -76,9 +76,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(20), // Folder structure
+            Constraint::Percentage(10), // Folder structure
             Constraint::Percentage(30), // List of mails
-            Constraint::Percentage(50), // Selected email details
+            Constraint::Percentage(60), // Selected email details
         ])
         .split(f.size());
 
@@ -143,13 +143,13 @@ pub fn render(f: &mut Frame, state: &UIState) {
             }
 
             // Truncate to fit if necessary (crude)
-            let s_label = format!(" Sender: {}", sender);
-            let t_label = format!(" Time:   {}", time_str);
-            let sub_label = format!(" Sub:    {}", subject);
+            let s_label = format!(" From: {}", sender);
+            let t_label = format!(" Time: {}", time_str);
+            let sub_label = format!(" Subj: {}", subject);
 
             let pad = |s: String, len: usize| {
                 if s.len() > len {
-                    format!("{}...", &s[..len.saturating_sub(4)])
+                    format!("{}...", &s[..len.saturating_sub(3)])
                 } else {
                     format!("{:width$}", s, width = len)
                 }
