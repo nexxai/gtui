@@ -12,6 +12,33 @@ impl Database {
         Ok(Self { pool })
     }
 
+    pub async fn get_messages_by_thread(&self, thread_id: &str) -> Result<Vec<models::Message>> {
+        let rows = sqlx::query(
+            "SELECT id, thread_id, snippet, from_address, to_address, subject, internal_date, body_plain, body_html, is_read 
+             FROM messages 
+             WHERE thread_id = ?
+             ORDER BY internal_date ASC"
+        )
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let messages = rows.into_iter().map(|row| models::Message {
+            id: row.get(0),
+            thread_id: row.get(1),
+            snippet: row.get(2),
+            from_address: row.get(3),
+            to_address: row.get(4),
+            subject: row.get(5),
+            internal_date: row.get(6),
+            body_plain: row.get(7),
+            body_html: row.get(8),
+            is_read: row.get(9),
+        }).collect();
+
+        Ok(messages)
+    }
+
     pub async fn run_migrations(&self) -> Result<()> {
         let schema = include_str!("../schema.sql");
         sqlx::query(schema).execute(&self.pool).await?;

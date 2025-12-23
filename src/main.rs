@@ -17,6 +17,7 @@ use google_gmail1::Gmail;
 use crate::gmail::GmailClient;
 use crate::ui::FocusedPanel;
 use crate::config::{Config, matches_key};
+use chrono::{DateTime, Local};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -99,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
         ui_state.messages = db.get_messages_by_label(&label.id, limit, current_offset).await?;
+        if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+            ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+        }
     }
 
     loop {
@@ -135,11 +139,20 @@ async fn main() -> anyhow::Result<()> {
                                     current_offset = 0;
                                     ui_state.messages = db.get_messages_by_label(&label.id, limit, current_offset).await?;
                                     ui_state.selected_message_index = 0;
+                                    if let Some(msg) = ui_state.messages.get(0) {
+                                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                                    } else {
+                                        ui_state.threaded_messages.clear();
+                                    }
                                 }
                             }
                             FocusedPanel::Messages => {
                                 if ui_state.selected_message_index < ui_state.messages.len().saturating_sub(1) {
                                     ui_state.selected_message_index += 1;
+                                    if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                                    }
+                                    
                                     if ui_state.selected_message_index >= ui_state.messages.len().saturating_sub(5) {
                                         current_offset += limit;
                                         if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
@@ -161,11 +174,19 @@ async fn main() -> anyhow::Result<()> {
                                     current_offset = 0;
                                     ui_state.messages = db.get_messages_by_label(&label.id, limit, current_offset).await?;
                                     ui_state.selected_message_index = 0;
+                                    if let Some(msg) = ui_state.messages.get(0) {
+                                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                                    } else {
+                                        ui_state.threaded_messages.clear();
+                                    }
                                 }
                             }
                             FocusedPanel::Messages => {
                                 if ui_state.selected_message_index > 0 {
                                     ui_state.selected_message_index -= 1;
+                                    if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                                    }
                                 }
                             }
                             FocusedPanel::Details => {}
@@ -196,11 +217,31 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 format!("Re: {}", subject)
                             };
+                            
+                            let mut quoted_body = String::new();
+                            for tm in &ui_state.threaded_messages {
+                                let date = DateTime::from_timestamp_millis(tm.internal_date)
+                                    .unwrap_or_default()
+                                    .with_timezone(&Local);
+                                
+                                quoted_body.push_str(&format!(
+                                    "\nOn {}, {} wrote:\n",
+                                    date.format("%a, %b %d, %Y at %l:%M %p"),
+                                    tm.from_address.as_deref().unwrap_or("Unknown")
+                                ));
+                                
+                                if let Some(body) = &tm.snippet {
+                                    for line in body.lines() {
+                                        quoted_body.push_str(&format!("> {}\n", line));
+                                    }
+                                }
+                            }
+
                             ui_state.mode = ui::UIMode::Composing;
                             ui_state.compose_state = Some(ui::ComposeState {
                                 to: m.from_address.clone().unwrap_or_default(),
                                 subject: new_subject,
-                                body: "".to_string(),
+                                body: format!("\n\n{}", quoted_body),
                             });
                         }
                     }

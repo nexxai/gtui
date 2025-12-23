@@ -1,10 +1,11 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Clear},
     Frame,
 };
 use crate::models;
+use chrono::{DateTime, Local};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FocusedPanel {
@@ -28,6 +29,7 @@ pub struct ComposeState {
 pub struct UIState {
     pub labels: Vec<models::Label>,
     pub messages: Vec<models::Message>,
+    pub threaded_messages: Vec<models::Message>,
     pub selected_label_index: usize,
     pub selected_message_index: usize,
     pub focused_panel: FocusedPanel,
@@ -40,6 +42,7 @@ impl Default for UIState {
         Self {
             labels: Vec::new(),
             messages: Vec::new(),
+            threaded_messages: Vec::new(),
             selected_label_index: 0,
             selected_message_index: 0,
             focused_panel: FocusedPanel::Labels,
@@ -54,8 +57,8 @@ pub fn render(f: &mut Frame, state: &UIState) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(20), // Folder structure
-            Constraint::Percentage(20), // List of mails
-            Constraint::Percentage(60), // Selected email details
+            Constraint::Percentage(30), // List of mails
+            Constraint::Percentage(50), // Selected email details
         ])
         .split(f.size());
 
@@ -90,8 +93,16 @@ pub fn render(f: &mut Frame, state: &UIState) {
     let msg_items: Vec<ListItem> = state.messages.iter()
         .enumerate()
         .map(|(i, m)| {
+            let sender = m.from_address.as_deref().unwrap_or("Unknown");
+            let subject = m.subject.as_deref().unwrap_or("(No Subject)");
+            
+            let date = DateTime::from_timestamp_millis(m.internal_date)
+                .unwrap_or_default()
+                .with_timezone(&Local);
+            let time_str = date.format("%b %d %H:%M").to_string();
+
             let mut style = if i == state.selected_message_index {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
             };
@@ -100,14 +111,17 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 style = style.add_modifier(Modifier::BOLD);
             }
 
-            let subject = m.subject.as_deref().unwrap_or("(No Subject)");
-            ListItem::new(subject).style(style)
+            let content = format!(" {}\n {}\n {}", time_str, sender, subject);
+            
+            // We use vertical bars and dashes to simulate a rectangle/block within the ListItem
+            let item_text = format!("┌────────────────────────────┐\n{}\n└────────────────────────────┘", content);
+            ListItem::new(item_text).style(style)
         })
         .collect();
 
     let messages_block = Block::default()
         .borders(Borders::ALL)
-        .title("Messages")
+        .title("Conversations")
         .border_style(if state.focused_panel == FocusedPanel::Messages {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
@@ -117,46 +131,74 @@ pub fn render(f: &mut Frame, state: &UIState) {
     let list_widget = List::new(msg_items).block(messages_block);
     f.render_widget(list_widget, chunks[1]);
 
-    // Panel 3: Message Detail or Compose
-    match state.mode {
-        UIMode::Browsing => {
-            let detail_text = if let Some(m) = state.messages.get(state.selected_message_index) {
-                format!(
-                    "From: {}\nTo: {}\nSubject: {}\n\n{}",
-                    m.from_address.as_deref().unwrap_or(""),
-                    m.to_address.as_deref().unwrap_or(""),
-                    m.subject.as_deref().unwrap_or(""),
-                    m.snippet.as_deref().unwrap_or("")
-                )
-            } else {
-                "No email selected".to_string()
-            };
+    // Panel 3: Thread Details
+    let details_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Conversation Context")
+        .border_style(if state.focused_panel == FocusedPanel::Details {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        });
 
-            let details_block = Block::default()
-                .borders(Borders::ALL)
-                .title("Email Details")
-                .border_style(if state.focused_panel == FocusedPanel::Details {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                });
-
-            let detail_paragraph = Paragraph::new(detail_text)
-                .block(details_block)
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(detail_paragraph, chunks[2]);
-        }
-        UIMode::Composing => {
-            if let Some(cs) = &state.compose_state {
-                let compose_text = format!(
-                    "To: {}\nSubject: {}\n\n{}",
-                    cs.to, cs.subject, cs.body
-                );
-                let compose_paragraph = Paragraph::new(compose_text)
-                    .block(Block::default().borders(Borders::ALL).title("Compose Message [Esc to Cancel, Ctrl-S to Send]"))
-                    .wrap(ratatui::widgets::Wrap { trim: true });
-                f.render_widget(compose_paragraph, chunks[2]);
-            }
+    let mut detail_content = String::new();
+    if state.threaded_messages.is_empty() {
+        detail_content = "No conversation selected".to_string();
+    } else {
+        for msg in &state.threaded_messages {
+            let sender = msg.from_address.as_deref().unwrap_or("Unknown");
+            let date = DateTime::from_timestamp_millis(msg.internal_date)
+                .unwrap_or_default()
+                .with_timezone(&Local);
+            let time_str = date.format("%Y-%m-%d %H:%M").to_string();
+            
+            detail_content.push_str(&format!("From: {}\nDate: {}\n\n{}\n", sender, time_str, msg.snippet.as_deref().unwrap_or("")));
+            detail_content.push_str("\n------------------------------------------------------------\n\n");
         }
     }
+
+    let detail_paragraph = Paragraph::new(detail_content)
+        .block(details_block)
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(detail_paragraph, chunks[2]);
+
+    // Popup for composing
+    if let UIMode::Composing = state.mode {
+        if let Some(cs) = &state.compose_state {
+            let area = centered_rect(80, 80, f.size());
+            f.render_widget(Clear, area); // This clears the background for the popup
+
+            let compose_text = format!(
+                "To: {}\nSubject: {}\n\n{}",
+                cs.to, cs.subject, cs.body
+            );
+            let compose_paragraph = Paragraph::new(compose_text)
+                .block(Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Compose Message [Esc to Cancel, Ctrl-S to Send] ")
+                    .border_style(Style::default().fg(Color::Cyan)))
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            f.render_widget(compose_paragraph, area);
+        }
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
