@@ -33,6 +33,7 @@ pub struct UIState {
     pub threaded_messages: Vec<models::Message>,
     pub selected_label_index: usize,
     pub selected_message_index: usize,
+    pub detail_scroll: u16,
     pub focused_panel: FocusedPanel,
     pub mode: UIMode,
     pub compose_state: Option<ComposeState>,
@@ -46,6 +47,7 @@ impl Default for UIState {
             threaded_messages: Vec::new(),
             selected_label_index: 0,
             selected_message_index: 0,
+            detail_scroll: 0,
             focused_panel: FocusedPanel::Messages,
             mode: UIMode::Browsing,
             compose_state: None,
@@ -199,7 +201,8 @@ pub fn render(f: &mut Frame, state: &UIState) {
 
     let detail_paragraph = Paragraph::new(detail_content)
         .block(details_block)
-        .wrap(ratatui::widgets::Wrap { trim: true });
+        .wrap(ratatui::widgets::Wrap { trim: true })
+        .scroll((state.detail_scroll, 0));
     f.render_widget(detail_paragraph, chunks[2]);
 
     // Popup for composing

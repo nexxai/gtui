@@ -159,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
                                         .get_messages_by_label(&label.id, limit, current_offset)
                                         .await?;
                                     ui_state.selected_message_index = 0;
+                                    ui_state.detail_scroll = 0;
                                     if let Some(msg) = ui_state.messages.get(0) {
                                         ui_state.threaded_messages =
                                             db.get_messages_by_thread(&msg.thread_id).await?;
@@ -172,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
                                     < ui_state.messages.len().saturating_sub(1)
                                 {
                                     ui_state.selected_message_index += 1;
+                                    ui_state.detail_scroll = 0;
                                     if let Some(msg) =
                                         ui_state.messages.get(ui_state.selected_message_index)
                                     {
@@ -198,7 +200,9 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            FocusedPanel::Details => {}
+                            FocusedPanel::Details => {
+                                ui_state.detail_scroll = ui_state.detail_scroll.saturating_add(1);
+                            }
                         }
                     } else if matches_key(key.code, &config.keybindings.move_up) {
                         match ui_state.focused_panel {
@@ -211,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
                                         .get_messages_by_label(&label.id, limit, current_offset)
                                         .await?;
                                     ui_state.selected_message_index = 0;
+                                    ui_state.detail_scroll = 0;
                                     if let Some(msg) = ui_state.messages.get(0) {
                                         ui_state.threaded_messages =
                                             db.get_messages_by_thread(&msg.thread_id).await?;
@@ -222,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
                             FocusedPanel::Messages => {
                                 if ui_state.selected_message_index > 0 {
                                     ui_state.selected_message_index -= 1;
+                                    ui_state.detail_scroll = 0;
                                     if let Some(msg) =
                                         ui_state.messages.get(ui_state.selected_message_index)
                                     {
@@ -230,7 +236,9 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            FocusedPanel::Details => {}
+                            FocusedPanel::Details => {
+                                ui_state.detail_scroll = ui_state.detail_scroll.saturating_sub(1);
+                            }
                         }
                     }
                     // Email Actions
