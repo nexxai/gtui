@@ -9,10 +9,10 @@ use yup_oauth2::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use yup_oauth2::storage::{TokenInfo, TokenStorage};
-use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
+use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
+use yup_oauth2::storage::{TokenInfo, TokenStorage};
 
 const APP_NAME: &str = "gtui";
 const TOKEN_KEY: &str = "gmail_token";
@@ -119,8 +119,7 @@ impl Authenticator {
         oauth2::authenticator::Authenticator<
             hyper_rustls::HttpsConnector<hyper::client::HttpConnector>,
         >,
-    > 
-    {
+    > {
         let auth =
             InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
                 .with_storage(Box::new(RingStorage))

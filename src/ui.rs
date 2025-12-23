@@ -209,7 +209,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 "From: {}\nDate: {}\n\n{}\n",
                 sender,
                 time_str,
-                msg.body_plain.as_deref().unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
+                msg.body_plain
+                    .as_deref()
+                    .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
             ));
             detail_content
                 .push_str("\n------------------------------------------------------------\n\n");
@@ -241,7 +243,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 .borders(Borders::ALL)
                 .title(" To ")
                 .border_style(if cs.focused_field == ComposeField::To {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 });
@@ -252,7 +256,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 .borders(Borders::ALL)
                 .title(" Subject ")
                 .border_style(if cs.focused_field == ComposeField::Subject {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 });
@@ -263,7 +269,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 .borders(Borders::ALL)
                 .title(" Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch] ")
                 .border_style(if cs.focused_field == ComposeField::Body {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 });
@@ -275,7 +283,9 @@ pub fn render(f: &mut Frame, state: &UIState) {
             // Set cursor position based on focused field
             let (cursor_x, cursor_y) = match cs.focused_field {
                 ComposeField::To => (chunks[0].x + 1 + cs.cursor_index as u16, chunks[0].y + 1),
-                ComposeField::Subject => (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1),
+                ComposeField::Subject => {
+                    (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1)
+                }
                 ComposeField::Body => {
                     let mut x = 0;
                     let mut y = 0;
@@ -327,7 +337,11 @@ fn render_authentication(f: &mut Frame, state: &UIState) {
 
     if let Some(url) = &state.auth_url {
         let url_p = Paragraph::new(url.as_str())
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::UNDERLINED))
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::UNDERLINED),
+            )
             .block(Block::default().borders(Borders::ALL).title(" URL "))
             .wrap(ratatui::widgets::Wrap { trim: false }); // Wrap the URL!
         f.render_widget(url_p, chunks[1]);

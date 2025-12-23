@@ -177,7 +177,8 @@ impl GmailClient {
         use std::io::Cursor;
         let cursor = Cursor::new(raw_message.into_bytes());
 
-        let result = self.hub
+        let result = self
+            .hub
             .users()
             .messages_send(google_gmail1::api::Message::default(), "me")
             .upload(cursor, "message/rfc822".parse().unwrap())
@@ -190,8 +191,12 @@ impl GmailClient {
             {
                 use std::io::Write;
                 match &result {
-                    Ok(_) => { let _ = writeln!(file, "Result: SUCCESS"); }
-                    Err(e) => { let _ = writeln!(file, "Result: ERROR: {:?}", e); }
+                    Ok(_) => {
+                        let _ = writeln!(file, "Result: SUCCESS");
+                    }
+                    Err(e) => {
+                        let _ = writeln!(file, "Result: ERROR: {:?}", e);
+                    }
                 }
             }
         }
@@ -250,12 +255,16 @@ fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) ->
         if mime == mime_type {
             if let Some(body) = &part.body {
                 if let Some(data) = &body.data {
-                    use base64::{engine::general_purpose, Engine as _};
+                    use base64::{Engine as _, engine::general_purpose};
                     let data_str = String::from_utf8_lossy(data);
-                    
+
                     // Try decoding as base64url (Gmail's default)
-                    let decoded = general_purpose::URL_SAFE_NO_PAD.decode(data_str.trim().replace('-', "+").replace('_', "/"))
-                        .or_else(|_| general_purpose::URL_SAFE.decode(data_str.trim().replace('-', "+").replace('_', "/")))
+                    let decoded = general_purpose::URL_SAFE_NO_PAD
+                        .decode(data_str.trim().replace('-', "+").replace('_', "/"))
+                        .or_else(|_| {
+                            general_purpose::URL_SAFE
+                                .decode(data_str.trim().replace('-', "+").replace('_', "/"))
+                        })
                         .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
                         .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
 

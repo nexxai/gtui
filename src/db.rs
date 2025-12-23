@@ -186,7 +186,7 @@ impl Database {
              JOIN message_labels ml ON m.id = ml.message_id
              WHERE ml.label_id = ?
              ORDER BY m.internal_date DESC
-             LIMIT ?"
+             LIMIT ?",
         )
         .bind(label_id)
         .bind(limit)
@@ -218,7 +218,7 @@ impl Database {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        
+
         if let Some(r) = row {
             Ok(Some(r.get(0)))
         } else {

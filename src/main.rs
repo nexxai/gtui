@@ -49,15 +49,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Initial Auth setup
     let secret = auth::Authenticator::load_secret("credentials.json").await?;
-    
+
     use tokio::sync::mpsc;
     let (tx, mut rx) = mpsc::channel::<String>(1);
     let (done_tx, mut done_rx) = mpsc::channel::<bool>(1);
     let (refresh_tx, mut refresh_rx) = mpsc::channel::<()>(1);
 
-    let auth_builder = auth::Authenticator::authenticate(secret, auth::TuiDelegate {
-        tx,
-    }).await?;
+    let auth_builder = auth::Authenticator::authenticate(secret, auth::TuiDelegate { tx }).await?;
 
     let auth_clone = auth_builder.clone();
     tokio::spawn(async move {
@@ -69,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let mut authenticated = false;
     let mut current_offset = 0;
     let limit = 50;
-    
+
     // We'll hold these in Options until authenticated
     let mut gmail_client: Option<GmailClient> = None;
 
@@ -79,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
             ui_state.auth_url = Some(url);
             ui_state.mode = ui::UIMode::Authentication;
         }
-        
+
         if !authenticated {
             if let Ok(true) = done_rx.try_recv() {
                 authenticated = true;
@@ -98,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
                     ),
                     auth_builder.clone(),
                 );
-                
+
                 let client = GmailClient::new(hub, debug_logging);
                 gmail_client = Some(client.clone());
 
@@ -128,31 +126,46 @@ async fn main() -> anyhow::Result<()> {
                                         remote_ids.insert(id.clone());
                                         if let Ok(exists) = sync_db.message_exists(&id).await {
                                             if !exists {
-                                                if let Ok(msg) = sync_client.get_message(&id).await {
-                                                    oldest_date = oldest_date.min(msg.internal_date);
+                                                if let Ok(msg) = sync_client.get_message(&id).await
+                                                {
+                                                    oldest_date =
+                                                        oldest_date.min(msg.internal_date);
                                                     messages.push(msg);
                                                 }
                                             } else {
                                                 // We still need the date for our "oldest_date" window check
-                                                if let Ok(Some(date)) = sync_db.get_message_date(&id).await {
+                                                if let Ok(Some(date)) =
+                                                    sync_db.get_message_date(&id).await
+                                                {
                                                     oldest_date = oldest_date.min(date);
                                                 }
                                             }
                                         }
                                     }
-                                    
+
                                     let _ = sync_db.upsert_messages(&messages, label_id).await;
                                     if !messages.is_empty() {
                                         has_new_data = true;
                                     }
 
                                     // Detection of removals (archived/deleted from other clients)
-                                    if let Ok(local_info) = sync_db.get_messages_with_dates_by_label(label_id, 100).await {
+                                    if let Ok(local_info) = sync_db
+                                        .get_messages_with_dates_by_label(label_id, 100)
+                                        .await
+                                    {
                                         for (local_id, local_date) in local_info {
-                                            if local_date >= oldest_date && !remote_ids.contains(&local_id) {
-                                                if let Ok(_) = sync_db.remove_label_from_message(&local_id, label_id).await {
+                                            if local_date >= oldest_date
+                                                && !remote_ids.contains(&local_id)
+                                            {
+                                                if let Ok(_) = sync_db
+                                                    .remove_label_from_message(&local_id, label_id)
+                                                    .await
+                                                {
                                                     has_new_data = true;
-                                                    sync_client.debug_log(&format!("Detected remote removal of {} from {}", local_id, label_id));
+                                                    sync_client.debug_log(&format!(
+                                                        "Detected remote removal of {} from {}",
+                                                        local_id, label_id
+                                                    ));
                                                 }
                                             }
                                         }
@@ -179,7 +192,8 @@ async fn main() -> anyhow::Result<()> {
                         .get_messages_by_label(&label.id, limit, current_offset)
                         .await?;
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                        ui_state.threaded_messages =
+                            db.get_messages_by_thread(&msg.thread_id).await?;
                     }
                 }
             }
@@ -194,19 +208,20 @@ async fn main() -> anyhow::Result<()> {
                 let new_messages = db
                     .get_messages_by_label(&label.id, limit, current_offset)
                     .await?;
-                
+
                 // If the message list changed, we need to be careful with the selection index
                 ui_state.messages = new_messages;
-                
+
                 // Clamp selection index
                 if !ui_state.messages.is_empty() {
                     if ui_state.selected_message_index >= ui_state.messages.len() {
                         ui_state.selected_message_index = ui_state.messages.len().saturating_sub(1);
                     }
-                    
+
                     // Re-load threaded messages for selected message
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                        ui_state.threaded_messages =
+                            db.get_messages_by_thread(&msg.thread_id).await?;
                     }
                 } else {
                     ui_state.selected_message_index = 0;
@@ -367,7 +382,8 @@ async fn main() -> anyhow::Result<()> {
                                         } else {
                                             let _ = gmail.mark_as_unread(&id).await;
                                         }
-                                        let _ = db_clone.mark_message_as_read(&id, new_status).await;
+                                        let _ =
+                                            db_clone.mark_message_as_read(&id, new_status).await;
                                     }
                                 });
                             }
@@ -470,7 +486,8 @@ async fn main() -> anyhow::Result<()> {
                                         eprintln!("Error archiving message: {}", e);
                                     }
                                     if let Ok(db_clone) = db::Database::new(&db_url_str).await {
-                                        let _ = db_clone.remove_label_from_message(&id, "INBOX").await;
+                                        let _ =
+                                            db_clone.remove_label_from_message(&id, "INBOX").await;
                                     }
                                 });
                             }
@@ -495,14 +512,14 @@ async fn main() -> anyhow::Result<()> {
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
                         if let Some(cs) = &ui_state.compose_state {
-                        if let Some(gmail) = &gmail_client {
-                            let (to, sub, body) =
-                                (cs.to.clone(), cs.subject.clone(), cs.body.clone());
-                            let gmail = gmail.clone();
-                            tokio::spawn(async move {
-                                let _ = gmail.send_message(&to, &sub, &body).await;
-                            });
-                        }
+                            if let Some(gmail) = &gmail_client {
+                                let (to, sub, body) =
+                                    (cs.to.clone(), cs.subject.clone(), cs.body.clone());
+                                let gmail = gmail.clone();
+                                tokio::spawn(async move {
+                                    let _ = gmail.send_message(&to, &sub, &body).await;
+                                });
+                            }
                         }
                         ui_state.mode = ui::UIMode::Browsing;
                         let _ = execute!(io::stdout(), crossterm::cursor::Hide);
