@@ -123,7 +123,7 @@ pub fn render(f: &mut Frame, state: &UIState) {
     f.render_widget(labels_list, chunks[0]);
 
     // Panel 2: Message List
-    let list_width = chunks[1].width.saturating_sub(2) as usize;
+    let list_width = chunks[1].width.saturating_sub(2) as usize; // Inset from sides
     let border_line = "─".repeat(list_width.saturating_sub(2));
 
     let msg_items: Vec<ListItem> = state
@@ -168,7 +168,7 @@ pub fn render(f: &mut Frame, state: &UIState) {
             let line3 = format!("│{}│", pad(sub_label, inner_len));
 
             let item_text = format!(
-                "┌{}┐\n{}\n{}\n{}\n└{}┘",
+                "┌{}┐\n{}\n{}\n{}\n└{}┘\n",
                 border_line, line1, line2, line3, border_line
             );
             ListItem::new(item_text).style(style)
