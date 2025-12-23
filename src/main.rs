@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             for label_id in &["INBOX", "SENT"] {
-                                if let Ok((ids, _)) = sync_client
+                                if let Ok((ids, next_page_token)) = sync_client
                                     .list_messages(vec![label_id.to_string()], 100, None)
                                     .await
                                 {
@@ -122,25 +122,32 @@ async fn main() -> anyhow::Result<()> {
                                     let mut remote_ids = std::collections::HashSet::new();
                                     let mut oldest_date = i64::MAX;
 
-                                    for id in ids {
+                                    for id in &ids {
                                         remote_ids.insert(id.clone());
-                                        if let Ok(exists) = sync_db.message_exists(&id).await {
+                                        if let Ok(exists) = sync_db.message_exists(id).await {
                                             if !exists {
-                                                if let Ok(msg) = sync_client.get_message(&id).await
-                                                {
+                                                if let Ok(msg) = sync_client.get_message(id).await {
                                                     oldest_date =
                                                         oldest_date.min(msg.internal_date);
                                                     messages.push(msg);
                                                 }
                                             } else {
-                                                // We still need the date for our "oldest_date" window check
                                                 if let Ok(Some(date)) =
-                                                    sync_db.get_message_date(&id).await
+                                                    sync_db.get_message_date(id).await
                                                 {
                                                     oldest_date = oldest_date.min(date);
                                                 }
                                             }
                                         }
+                                    }
+
+                                    // CRITICAL FIX: Only set oldest_date to 0 if we know we have the ENTIRE folder.
+                                    // If there's a next page, we only know about messages newer than the oldest one we fetched.
+                                    if next_page_token.is_none() && !ids.is_empty() {
+                                        oldest_date = 0;
+                                    } else if ids.is_empty() {
+                                        // If the folder is empty on remote, it should be empty locally too.
+                                        oldest_date = 0;
                                     }
 
                                     let _ = sync_db.upsert_messages(&messages, label_id).await;
@@ -150,10 +157,11 @@ async fn main() -> anyhow::Result<()> {
 
                                     // Detection of removals (archived/deleted from other clients)
                                     if let Ok(local_info) = sync_db
-                                        .get_messages_with_dates_by_label(label_id, 100)
+                                        .get_messages_with_dates_by_label(label_id, 200)
                                         .await
                                     {
                                         for (local_id, local_date) in local_info {
+                                            // Only remove if we are sure it SHOULD be in our results window
                                             if local_date >= oldest_date
                                                 && !remote_ids.contains(&local_id)
                                             {
@@ -163,8 +171,8 @@ async fn main() -> anyhow::Result<()> {
                                                 {
                                                     has_new_data = true;
                                                     sync_client.debug_log(&format!(
-                                                        "Detected remote removal of {} from {}",
-                                                        local_id, label_id
+                                                        "REMOVAL: Confirmed {} missing from {} (older_than: {})", 
+                                                        local_id, label_id, oldest_date
                                                     ));
                                                 }
                                             }
@@ -399,29 +407,31 @@ async fn main() -> anyhow::Result<()> {
                             };
 
                             let mut quoted_body = String::new();
-                            for tm in &ui_state.threaded_messages {
-                                let date = DateTime::from_timestamp_millis(tm.internal_date)
-                                    .unwrap_or_default()
-                                    .with_timezone(&Local);
+                            let date = DateTime::from_timestamp_millis(m.internal_date)
+                                .unwrap_or_default()
+                                .with_timezone(&Local);
 
-                                quoted_body.push_str(&format!(
-                                    "\nOn {}, {} wrote:\n",
-                                    date.format("%a, %b %d, %Y at %l:%M %p"),
-                                    tm.from_address.as_deref().unwrap_or("Unknown")
-                                ));
+                            quoted_body.push_str(&format!(
+                                "\nOn {}, {} wrote:\n",
+                                date.format("%a, %b %d, %Y at %l:%M %p"),
+                                m.from_address.as_deref().unwrap_or("Unknown")
+                            ));
 
-                                if let Some(body) = &tm.snippet {
-                                    for line in body.lines() {
-                                        quoted_body.push_str(&format!("> {}\n", line));
-                                    }
+                            let body_to_quote = m.body_plain.as_ref().or(m.snippet.as_ref());
+                            if let Some(body) = body_to_quote {
+                                for line in body.lines() {
+                                    quoted_body.push_str(&format!("> {}\n", line));
                                 }
                             }
 
-                            let mut final_body = format!("\n\n{}", quoted_body);
+                            let mut signature_part = String::new();
                             if let Some(sig) = &config.signatures.reply {
-                                final_body.push_str("\n\n--\n");
-                                final_body.push_str(sig);
+                                signature_part.push_str("--\n");
+                                signature_part.push_str(sig);
+                                signature_part.push_str("\n\n");
                             }
+
+                            let final_body = format!("\n\n{}{}", signature_part, quoted_body);
 
                             ui_state.mode = ui::UIMode::Composing;
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);

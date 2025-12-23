@@ -8,7 +8,12 @@ pub struct Database {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = SqlitePool::connect(database_url).await?;
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+
+        let pool = SqlitePool::connect_with(options).await?;
         Ok(Self { pool })
     }
 
