@@ -125,10 +125,19 @@ async fn main() -> anyhow::Result<()> {
                                     let mut oldest_date = i64::MAX;
 
                                     for id in ids {
-                                        if let Ok(msg) = sync_client.get_message(&id).await {
-                                            remote_ids.insert(msg.id.clone());
-                                            oldest_date = oldest_date.min(msg.internal_date);
-                                            messages.push(msg);
+                                        remote_ids.insert(id.clone());
+                                        if let Ok(exists) = sync_db.message_exists(&id).await {
+                                            if !exists {
+                                                if let Ok(msg) = sync_client.get_message(&id).await {
+                                                    oldest_date = oldest_date.min(msg.internal_date);
+                                                    messages.push(msg);
+                                                }
+                                            } else {
+                                                // We still need the date for our "oldest_date" window check
+                                                if let Ok(Some(date)) = sync_db.get_message_date(&id).await {
+                                                    oldest_date = oldest_date.min(date);
+                                                }
+                                            }
                                         }
                                     }
                                     
@@ -140,11 +149,10 @@ async fn main() -> anyhow::Result<()> {
                                     // Detection of removals (archived/deleted from other clients)
                                     if let Ok(local_info) = sync_db.get_messages_with_dates_by_label(label_id, 100).await {
                                         for (local_id, local_date) in local_info {
-                                            // If the message is newer than the oldest sync'd message but not in the sync list,
-                                            // it means it was removed from this label.
                                             if local_date >= oldest_date && !remote_ids.contains(&local_id) {
                                                 if let Ok(_) = sync_db.remove_label_from_message(&local_id, label_id).await {
                                                     has_new_data = true;
+                                                    sync_client.debug_log(&format!("Detected remote removal of {} from {}", local_id, label_id));
                                                 }
                                             }
                                         }
@@ -183,12 +191,26 @@ async fn main() -> anyhow::Result<()> {
             ui_state.labels = db.get_labels().await?;
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
                 // Re-load messages for current label
-                ui_state.messages = db
+                let new_messages = db
                     .get_messages_by_label(&label.id, limit, current_offset)
                     .await?;
-                // Re-load threaded messages for selected message
-                if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                    ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                
+                // If the message list changed, we need to be careful with the selection index
+                ui_state.messages = new_messages;
+                
+                // Clamp selection index
+                if !ui_state.messages.is_empty() {
+                    if ui_state.selected_message_index >= ui_state.messages.len() {
+                        ui_state.selected_message_index = ui_state.messages.len().saturating_sub(1);
+                    }
+                    
+                    // Re-load threaded messages for selected message
+                    if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                        ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                    }
+                } else {
+                    ui_state.selected_message_index = 0;
+                    ui_state.threaded_messages.clear();
                 }
             }
         }

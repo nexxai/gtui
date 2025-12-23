@@ -205,6 +205,27 @@ impl Database {
         Ok(())
     }
 
+    pub async fn message_exists(&self, id: &str) -> Result<bool> {
+        let row = sqlx::query("SELECT 1 FROM messages WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn get_message_date(&self, id: &str) -> Result<Option<i64>> {
+        let row = sqlx::query("SELECT internal_date FROM messages WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        
+        if let Some(r) = row {
+            Ok(Some(r.get(0)))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn delete_message(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM message_labels WHERE message_id = ?")
             .bind(id)

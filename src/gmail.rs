@@ -231,7 +231,7 @@ impl GmailClient {
         Ok(())
     }
 
-    fn debug_log(&self, msg: &str) {
+    pub fn debug_log(&self, msg: &str) {
         if self.debug_logging {
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
