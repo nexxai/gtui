@@ -269,9 +269,20 @@ pub fn render(f: &mut Frame, state: &UIState) {
                 ComposeField::To => (chunks[0].x + 1 + cs.cursor_index as u16, chunks[0].y + 1),
                 ComposeField::Subject => (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1),
                 ComposeField::Body => {
-                    // Very simple cursor placement for body (doesn't handle wrapping)
-                    (chunks[2].x + 1 + (cs.cursor_index as u16 % chunks[2].width.saturating_sub(2)), 
-                     chunks[2].y + 1 + (cs.cursor_index as u16 / chunks[2].width.saturating_sub(2)))
+                    let mut x = 0;
+                    let mut y = 0;
+                    for (i, c) in cs.body.chars().enumerate() {
+                        if i >= cs.cursor_index {
+                            break;
+                        }
+                        if c == '\n' {
+                            x = 0;
+                            y += 1;
+                        } else {
+                            x += 1;
+                        }
+                    }
+                    (chunks[2].x + 1 + x as u16, chunks[2].y + 1 + y as u16)
                 }
             };
             f.set_cursor(cursor_x, cursor_y);
