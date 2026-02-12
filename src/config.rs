@@ -53,10 +53,10 @@ impl Default for Config {
 pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
     let mut parts: Vec<&str> = key_str.split('-').collect();
     let mut modifiers = KeyModifiers::empty();
-    
+
     // We process from the end to find the base key, then consume prefixes
     let base_key_str = parts.pop().unwrap_or("");
-    
+
     for part in parts {
         match part.to_lowercase().as_str() {
             "ctrl" => modifiers.insert(KeyModifiers::CONTROL),
@@ -64,7 +64,7 @@ pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
             "shift" => modifiers.insert(KeyModifiers::SHIFT),
             "cmd" | "command" | "super" => modifiers.insert(KeyModifiers::SUPER),
             "meta" => modifiers.insert(KeyModifiers::META),
-            _ => {},
+            _ => {}
         }
     }
 

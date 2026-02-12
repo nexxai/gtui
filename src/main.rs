@@ -127,111 +127,119 @@ async fn main() -> anyhow::Result<()> {
                                 let _ = sync_db.upsert_labels(&l).await;
                                 has_new_data = true;
 
-                            // Build label list, with priority label first
-                            let mut label_ids: Vec<String> = l.iter().map(|label| label.id.clone()).collect();
+                                // Build label list, with priority label first
+                                let mut label_ids: Vec<String> =
+                                    l.iter().map(|label| label.id.clone()).collect();
 
-                            // Drain priority channel and move priority label to front
-                            let mut priority_label = None;
-                            while let Ok(p) = priority_rx.try_recv() {
-                                priority_label = Some(p);
-                            }
-                            if let Some(ref priority) = priority_label {
-                                if let Some(pos) = label_ids.iter().position(|id| id == priority) {
-                                    let p = label_ids.remove(pos);
-                                    label_ids.insert(0, p);
+                                // Drain priority channel and move priority label to front
+                                let mut priority_label = None;
+                                while let Ok(p) = priority_rx.try_recv() {
+                                    priority_label = Some(p);
                                 }
-                            }
-
-                            for label_id in &label_ids {
-                                // Update currently_syncing state
-                                if let Ok(mut state) = sync_state_clone.lock() {
-                                    state.currently_syncing = Some(label_id.clone());
+                                if let Some(ref priority) = priority_label {
+                                    if let Some(pos) =
+                                        label_ids.iter().position(|id| id == priority)
+                                    {
+                                        let p = label_ids.remove(pos);
+                                        label_ids.insert(0, p);
+                                    }
                                 }
 
-                                if let Ok((ids, next_page_token)) = sync_client
-                                    .list_messages(vec![label_id.to_string()], 100, None)
-                                    .await
-                                {
-                                    let mut messages = Vec::new();
-                                    let mut remote_ids = std::collections::HashSet::new();
-                                    let mut oldest_date = i64::MAX;
+                                for label_id in &label_ids {
+                                    // Update currently_syncing state
+                                    if let Ok(mut state) = sync_state_clone.lock() {
+                                        state.currently_syncing = Some(label_id.clone());
+                                    }
 
-                                    for id in &ids {
-                                        remote_ids.insert(id.clone());
-                                        if let Ok(exists) = sync_db.message_exists(id).await {
-                                            if !exists {
-                                                if let Ok(msg) = sync_client.get_message(id).await {
-                                                    oldest_date =
-                                                        oldest_date.min(msg.internal_date);
-                                                    messages.push(msg);
-                                                }
-                                            } else {
-                                                if let Ok(Some(date)) =
-                                                    sync_db.get_message_date(id).await
-                                                {
-                                                    oldest_date = oldest_date.min(date);
+                                    if let Ok((ids, next_page_token)) = sync_client
+                                        .list_messages(vec![label_id.to_string()], 100, None)
+                                        .await
+                                    {
+                                        let mut messages = Vec::new();
+                                        let mut remote_ids = std::collections::HashSet::new();
+                                        let mut oldest_date = i64::MAX;
+
+                                        for id in &ids {
+                                            remote_ids.insert(id.clone());
+                                            if let Ok(exists) = sync_db.message_exists(id).await {
+                                                if !exists {
+                                                    if let Ok(msg) =
+                                                        sync_client.get_message(id).await
+                                                    {
+                                                        oldest_date =
+                                                            oldest_date.min(msg.internal_date);
+                                                        messages.push(msg);
+                                                    }
+                                                } else {
+                                                    if let Ok(Some(date)) =
+                                                        sync_db.get_message_date(id).await
+                                                    {
+                                                        oldest_date = oldest_date.min(date);
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    // Only perform removal if we have the COMPLETE picture from Gmail
-                                    // (no next page token means we got all results) AND we actually got results.
-                                    // If there's a next_page_token, we only have a partial view
-                                    // and MUST NOT remove anything — doing so would incorrectly
-                                    // strip labels from messages outside the partial window.
-                                    let should_remove = next_page_token.is_none() && !ids.is_empty();
+                                        // Only perform removal if we have the COMPLETE picture from Gmail
+                                        // (no next page token means we got all results) AND we actually got results.
+                                        // If there's a next_page_token, we only have a partial view
+                                        // and MUST NOT remove anything — doing so would incorrectly
+                                        // strip labels from messages outside the partial window.
+                                        let should_remove =
+                                            next_page_token.is_none() && !ids.is_empty();
 
-                                    sync_client.debug_log(&format!(
+                                        sync_client.debug_log(&format!(
                                         "SYNC {}: {} remote IDs, next_page={}, oldest_date={}, should_remove={}",
                                         label_id, ids.len(), next_page_token.is_some(), oldest_date, should_remove
                                     ));
 
-                                    let _ = sync_db.upsert_messages(&messages, label_id).await;
-                                    if !messages.is_empty() {
-                                        has_new_data = true;
-                                    }
+                                        let _ = sync_db.upsert_messages(&messages, label_id).await;
+                                        if !messages.is_empty() {
+                                            has_new_data = true;
+                                        }
 
-                                    // Detection of removals (archived/deleted from other clients)
-                                    // Only do this if we have the complete remote picture
-                                    if should_remove {
-                                        if let Ok(local_info) = sync_db
-                                            .get_messages_with_dates_by_label(label_id, 200)
-                                            .await
-                                        {
-                                            for (local_id, local_date) in local_info {
-                                                // Only remove if the message is within the date range
-                                                // of what the remote returned (i.e. it SHOULD have been
-                                                // in the remote set if it still had this label)
-                                                if local_date >= oldest_date
-                                                    && !remote_ids.contains(&local_id)
-                                                {
-                                                    if let Ok(_) = sync_db
-                                                        .remove_label_from_message(&local_id, label_id)
-                                                        .await
+                                        // Detection of removals (archived/deleted from other clients)
+                                        // Only do this if we have the complete remote picture
+                                        if should_remove {
+                                            if let Ok(local_info) = sync_db
+                                                .get_messages_with_dates_by_label(label_id, 200)
+                                                .await
+                                            {
+                                                for (local_id, local_date) in local_info {
+                                                    // Only remove if the message is within the date range
+                                                    // of what the remote returned (i.e. it SHOULD have been
+                                                    // in the remote set if it still had this label)
+                                                    if local_date >= oldest_date
+                                                        && !remote_ids.contains(&local_id)
                                                     {
-                                                        has_new_data = true;
-                                                        sync_client.debug_log(&format!(
+                                                        if let Ok(_) = sync_db
+                                                            .remove_label_from_message(
+                                                                &local_id, label_id,
+                                                            )
+                                                            .await
+                                                        {
+                                                            has_new_data = true;
+                                                            sync_client.debug_log(&format!(
                                                             "REMOVAL: Confirmed {} missing from {} (oldest_date: {})", 
                                                             local_id, label_id, oldest_date
                                                         ));
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                // Mark this label as synced and send refresh
-                                if let Ok(mut state) = sync_state_clone.lock() {
-                                    state.synced_labels.insert(label_id.clone());
-                                    state.currently_syncing = None;
+                                    // Mark this label as synced and send refresh
+                                    if let Ok(mut state) = sync_state_clone.lock() {
+                                        state.synced_labels.insert(label_id.clone());
+                                        state.currently_syncing = None;
+                                    }
+                                    if has_new_data {
+                                        let _ = sync_refresh_tx.send(()).await;
+                                        has_new_data = false;
+                                    }
                                 }
-                                if has_new_data {
-                                    let _ = sync_refresh_tx.send(()).await;
-                                    has_new_data = false;
-                                }
-                            }
                             }
 
                             if has_new_data {
@@ -491,7 +499,10 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             let mut signature_part = String::new();
-                            let sig_to_use = ui_state.remote_signature.as_ref().or(config.signatures.reply.as_ref());
+                            let sig_to_use = ui_state
+                                .remote_signature
+                                .as_ref()
+                                .or(config.signatures.reply.as_ref());
                             if let Some(sig) = sig_to_use {
                                 signature_part.push_str("--\n");
                                 signature_part.push_str(sig);
@@ -502,39 +513,42 @@ async fn main() -> anyhow::Result<()> {
 
                             ui_state.mode = ui::UIMode::Composing;
                             let _ = execute!(io::stdout(), crossterm::cursor::Show);
-                                ui_state.compose_state = Some(ui::ComposeState {
-                                    to: m.from_address.clone().unwrap_or_default(),
-                                    cc: "".to_string(),
-                                    bcc: "".to_string(),
-                                    subject: new_subject,
-                                    body: final_body,
-                                    focused_field: ui::ComposeField::Body,
-                                    cursor_index: 0,
-                                    show_cc_bcc: false,
-                                });
-                            }
-                        } else if matches_key(key, &config.keybindings.new_message) {
-                            // New message
-                            ui_state.mode = ui::UIMode::Composing;
-                            let _ = execute!(io::stdout(), crossterm::cursor::Show);
-
-                            let mut body = String::new();
-                            let sig_to_use = ui_state.remote_signature.as_ref().or(config.signatures.new_message.as_ref());
-                            if let Some(sig) = sig_to_use {
-                                body.push_str("\n\n--\n");
-                                body.push_str(sig);
-                            }
-
                             ui_state.compose_state = Some(ui::ComposeState {
-                                to: "".to_string(),
+                                to: m.from_address.clone().unwrap_or_default(),
                                 cc: "".to_string(),
                                 bcc: "".to_string(),
-                                subject: "".to_string(),
-                                body,
-                                focused_field: ui::ComposeField::To,
+                                subject: new_subject,
+                                body: final_body,
+                                focused_field: ui::ComposeField::Body,
                                 cursor_index: 0,
                                 show_cc_bcc: false,
                             });
+                        }
+                    } else if matches_key(key, &config.keybindings.new_message) {
+                        // New message
+                        ui_state.mode = ui::UIMode::Composing;
+                        let _ = execute!(io::stdout(), crossterm::cursor::Show);
+
+                        let mut body = String::new();
+                        let sig_to_use = ui_state
+                            .remote_signature
+                            .as_ref()
+                            .or(config.signatures.new_message.as_ref());
+                        if let Some(sig) = sig_to_use {
+                            body.push_str("\n\n--\n");
+                            body.push_str(sig);
+                        }
+
+                        ui_state.compose_state = Some(ui::ComposeState {
+                            to: "".to_string(),
+                            cc: "".to_string(),
+                            bcc: "".to_string(),
+                            subject: "".to_string(),
+                            body,
+                            focused_field: ui::ComposeField::To,
+                            cursor_index: 0,
+                            show_cc_bcc: false,
+                        });
                     } else if matches_key(key, &config.keybindings.delete) {
                         // Delete
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
@@ -556,6 +570,16 @@ async fn main() -> anyhow::Result<()> {
                                 && !ui_state.messages.is_empty()
                             {
                                 ui_state.selected_message_index = ui_state.messages.len() - 1;
+                            }
+
+                            // Refresh detail view
+                            if let Some(msg) =
+                                ui_state.messages.get(ui_state.selected_message_index)
+                            {
+                                ui_state.threaded_messages =
+                                    db.get_messages_by_thread(&msg.thread_id).await?;
+                            } else {
+                                ui_state.threaded_messages.clear();
                             }
                         }
                     } else if matches_key(key, &config.keybindings.archive) {
@@ -580,6 +604,16 @@ async fn main() -> anyhow::Result<()> {
                                 && !ui_state.messages.is_empty()
                             {
                                 ui_state.selected_message_index = ui_state.messages.len() - 1;
+                            }
+
+                            // Refresh detail view
+                            if let Some(msg) =
+                                ui_state.messages.get(ui_state.selected_message_index)
+                            {
+                                ui_state.threaded_messages =
+                                    db.get_messages_by_thread(&msg.thread_id).await?;
+                            } else {
+                                ui_state.threaded_messages.clear();
                             }
                         }
                     }
