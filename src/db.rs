@@ -253,4 +253,13 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    pub async fn add_label_to_message(&self, message_id: &str, label_id: &str) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO message_labels (message_id, label_id) VALUES (?, ?)")
+            .bind(message_id)
+            .bind(label_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
