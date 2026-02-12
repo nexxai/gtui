@@ -176,6 +176,37 @@ impl GmailClient {
         Ok(())
     }
 
+    pub async fn untrash_message(&self, id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Untrashing message: {}", id));
+        }
+        self.hub
+            .users()
+            .messages_untrash("me", id)
+            .doit()
+            .await
+            .context("Failed to untrash message")?;
+        Ok(())
+    }
+
+    pub async fn unarchive_message(&self, id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Unarchiving message: {}", id));
+        }
+        let req = google_gmail1::api::BatchModifyMessagesRequest {
+            ids: Some(vec![id.to_string()]),
+            add_label_ids: Some(vec!["INBOX".to_string()]),
+            remove_label_ids: None,
+        };
+        self.hub
+            .users()
+            .messages_batch_modify(req, "me")
+            .doit()
+            .await
+            .context("Failed to unarchive message")?;
+        Ok(())
+    }
+
     pub async fn send_message(
         &self,
         to: &str,
