@@ -1,4 +1,4 @@
 /target
 credentials.json
-gtui.db
+gtui.db*
 *.log
