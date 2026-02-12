@@ -1,4 +1,6 @@
 use crate::models;
+use crate::sync::SyncState;
+use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Local};
 use ratatui::{
     Frame,
@@ -55,6 +57,7 @@ pub struct UIState {
     pub compose_state: Option<ComposeState>,
     pub auth_url: Option<String>,
     pub remote_signature: Option<String>,
+    pub sync_state: Arc<Mutex<SyncState>>,
 }
 
 impl Default for UIState {
@@ -72,6 +75,7 @@ impl Default for UIState {
             compose_state: None,
             auth_url: None,
             remote_signature: None,
+            sync_state: Arc::new(Mutex::new(SyncState::default())),
         }
     }
 }
@@ -190,9 +194,50 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             Style::default().fg(Color::Gray)
         });
 
-    let list_widget = List::new(msg_items).block(messages_block);
-    state.messages_list_state.select(Some(state.selected_message_index));
-    f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
+    if state.messages.is_empty() {
+        // Show sync status or "no conversations" message
+        let current_label_id = state
+            .labels
+            .get(state.selected_label_index)
+            .map(|l| l.id.clone());
+        let current_label_name = state
+            .labels
+            .get(state.selected_label_index)
+            .map(|l| l.name.clone())
+            .unwrap_or_default();
+
+        let is_synced = if let Some(ref label_id) = current_label_id {
+            if let Ok(sync) = state.sync_state.lock() {
+                sync.synced_labels.contains(label_id)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let status_text = if is_synced {
+            "No conversations".to_string()
+        } else {
+            format!("\n\n  ⏳ Syncing \"{}\"…\n\n  Please wait.", current_label_name)
+        };
+
+        let status_style = if is_synced {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Yellow)
+        };
+
+        let status_paragraph = Paragraph::new(status_text)
+            .block(messages_block)
+            .style(status_style)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(status_paragraph, chunks[1]);
+    } else {
+        let list_widget = List::new(msg_items).block(messages_block);
+        state.messages_list_state.select(Some(state.selected_message_index));
+        f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
+    }
 
     // Panel 3: Thread Details
     let details_block = Block::default()
