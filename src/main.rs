@@ -331,6 +331,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ui::UIMode::Browsing => {
+                    // Clear status message on any keypress (will be set again if undo is pressed)
+                    if !matches_key(key, &config.keybindings.undo) {
+                        ui_state.status_message = None;
+                    }
                     if matches_key(key, &config.keybindings.quit) {
                         break;
                     }
