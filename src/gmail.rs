@@ -151,25 +151,38 @@ impl GmailClient {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn trash_message(&self, id: &str) -> Result<()> {
+        self.trash_messages(&[id.to_string()]).await
+    }
+
+    pub async fn trash_messages(&self, ids: &[String]) -> Result<()> {
         if self.debug_logging {
-            self.debug_log(&format!("Trashing message: {}", id));
+            self.debug_log(&format!("Trashing messages: {:?}", ids));
         }
+        let req = google_gmail1::api::BatchDeleteMessagesRequest {
+            ids: Some(ids.to_vec()),
+        };
         self.hub
             .users()
-            .messages_trash("me", id)
+            .messages_batch_delete(req, "me")
             .doit()
             .await
-            .context("Failed to trash message")?;
+            .context("Failed to trash messages")?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn archive_message(&self, id: &str) -> Result<()> {
+        self.archive_messages(&[id.to_string()]).await
+    }
+
+    pub async fn archive_messages(&self, ids: &[String]) -> Result<()> {
         if self.debug_logging {
-            self.debug_log(&format!("Archiving message: {}", id));
+            self.debug_log(&format!("Archiving messages: {:?}", ids));
         }
         let req = google_gmail1::api::BatchModifyMessagesRequest {
-            ids: Some(vec![id.to_string()]),
+            ids: Some(ids.to_vec()),
             remove_label_ids: Some(vec!["INBOX".to_string()]),
             add_label_ids: None,
         };
@@ -178,7 +191,42 @@ impl GmailClient {
             .messages_batch_modify(req, "me")
             .doit()
             .await
-            .context("Failed to archive message")?;
+            .context("Failed to archive messages")?;
+        Ok(())
+    }
+
+    pub async fn remove_label_from_messages(&self, ids: &[String], label_id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Removing label {} from messages: {:?}", label_id, ids));
+        }
+        let req = google_gmail1::api::BatchModifyMessagesRequest {
+            ids: Some(ids.to_vec()),
+            remove_label_ids: Some(vec![label_id.to_string()]),
+            add_label_ids: None,
+        };
+        self.hub
+            .users()
+            .messages_batch_modify(req, "me")
+            .doit()
+            .await
+            .context("Failed to remove label from messages")?;
+        Ok(())
+    }
+
+    pub async fn add_label_to_message(&self, id: &str, label_id: &str) -> Result<()> {
+        if self.debug_logging {
+            self.debug_log(&format!("Adding label {} to message: {}", label_id, id));
+        }
+        let req = google_gmail1::api::ModifyMessageRequest {
+            add_label_ids: Some(vec![label_id.to_string()]),
+            remove_label_ids: None,
+        };
+        self.hub
+            .users()
+            .messages_modify(req, "me", id)
+            .doit()
+            .await
+            .context("Failed to add label to message")?;
         Ok(())
     }
 

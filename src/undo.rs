@@ -3,15 +3,16 @@ use crate::models::Message;
 /// Represents an action that can be undone
 #[derive(Debug, Clone)]
 pub enum UndoableAction {
-    /// Message was deleted (moved to trash)
+    /// Messages were deleted (moved to trash) - stores all messages in the thread
     Delete {
-        message: Message,
+        messages: Vec<Message>,
         label_id: String,
         original_index: usize,
     },
-    /// Message was archived (INBOX label removed)
+    /// Messages were archived (label removed) - stores all messages in the thread
     Archive {
-        message: Message,
+        messages: Vec<Message>,
+        label_id: String,
         original_index: usize,
     },
 }

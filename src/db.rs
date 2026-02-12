@@ -49,6 +49,8 @@ impl Database {
         Ok(messages)
     }
 
+
+
     pub async fn run_migrations(&self) -> Result<()> {
         let schema = include_str!("../schema.sql");
         sqlx::query(schema).execute(&self.pool).await?;

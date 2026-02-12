@@ -81,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
     // We'll hold these in Options until authenticated
     let mut gmail_client: Option<GmailClient> = None;
 
+    // Clone sync_state for use in the main loop
+    let sync_state_loop = sync_state.clone();
+
     loop {
         // Check for auth messages
         while let Ok(url) = rx.try_recv() {
@@ -153,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
                                         state.currently_syncing = Some(label_id.clone());
                                     }
 
+                                    // Clean up expired entries from recently_modified
+                                    if let Ok(mut state) = sync_state_clone.lock() {
+                                        state.cleanup_expired();
+                                    }
+
                                     if let Ok((ids, next_page_token)) = sync_client
                                         .list_messages(vec![label_id.to_string()], 100, None)
                                         .await
@@ -162,6 +170,23 @@ async fn main() -> anyhow::Result<()> {
                                         let mut oldest_date = i64::MAX;
 
                                         for id in &ids {
+                                            // Skip messages that were recently modified locally
+                                            // to avoid race conditions with archive/delete
+                                            let is_recently_modified = if let Ok(state) = sync_state_clone.lock() {
+                                                state.is_recently_modified(id)
+                                            } else {
+                                                false
+                                            };
+
+                                            if is_recently_modified {
+                                                sync_client.debug_log(&format!(
+                                                    "SYNC SKIP: {} was recently modified, skipping",
+                                                    id
+                                                ));
+                                                // Don't add to remote_ids so removal detection works
+                                                continue;
+                                            }
+
                                             remote_ids.insert(id.clone());
                                             if let Ok(exists) = sync_db.message_exists(id).await {
                                                 if !exists {
@@ -208,6 +233,17 @@ async fn main() -> anyhow::Result<()> {
                                                 .await
                                             {
                                                 for (local_id, local_date) in local_info {
+                                                    // Skip messages that were recently modified locally
+                                                    let is_recently_modified = if let Ok(state) = sync_state_clone.lock() {
+                                                        state.is_recently_modified(&local_id)
+                                                    } else {
+                                                        false
+                                                    };
+                                                    
+                                                    if is_recently_modified {
+                                                        continue;
+                                                    }
+                                                    
                                                     // Only remove if the message is within the date range
                                                     // of what the remote returned (i.e. it SHOULD have been
                                                     // in the remote set if it still had this label)
@@ -620,8 +656,19 @@ async fn main() -> anyhow::Result<()> {
                             &body,
                         ));
                     } else if matches_key(key, &config.keybindings.delete) {
-                        // Delete
+                        // Delete all messages in the thread
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
+                            let thread_id = m.thread_id.clone();
+                            
+                            // Get all messages in the thread from the database
+                            let thread_messages = db.get_messages_by_thread(&thread_id).await?;
+                            let message_ids: Vec<String> = thread_messages.iter().map(|m| m.id.clone()).collect();
+                            
+                            // Mark messages as recently modified to prevent sync from re-adding them
+                            if let Ok(mut state) = sync_state_loop.lock() {
+                                state.mark_modified_many(message_ids.clone());
+                            }
+                            
                             // Capture for undo BEFORE removing
                             let current_label_id = ui_state
                                 .labels
@@ -630,87 +677,161 @@ async fn main() -> anyhow::Result<()> {
                                 .unwrap_or_else(|| "INBOX".to_string());
                             let original_index = ui_state.selected_message_index;
                             ui_state.undo_stack.push(UndoableAction::Delete {
-                                message: m.clone(),
-                                label_id: current_label_id,
+                                messages: thread_messages.clone(),
+                                label_id: current_label_id.clone(),
                                 original_index,
                             });
 
-                            let id = m.id.clone();
+                            // Delete from database SYNCHRONOUSLY to ensure consistency
+                            for id in &message_ids {
+                                if let Err(e) = db.delete_message(id).await {
+                                    eprintln!("Error deleting message from DB: {}", e);
+                                }
+                            }
+
+                            // Call Gmail API and await result to ensure it succeeds
+                            let mut api_succeeded = true;
                             if let Some(gmail) = &gmail_client {
-                                let gmail = gmail.clone();
-                                let db_url_str = db_url.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = gmail.trash_message(&id).await {
-                                        eprintln!("Error trashing message: {}", e);
+                                match gmail.trash_messages(&message_ids).await {
+                                    Ok(_) => {
+                                        ui_state.status_message = Some("Deleted successfully".to_string());
                                     }
-                                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
-                                        let _ = db_clone.delete_message(&id).await;
+                                    Err(e) => {
+                                        eprintln!("Error trashing messages: {}", e);
+                                        ui_state.status_message = Some(format!("Delete failed: {}", e));
+                                        api_succeeded = false;
+                                        // Restore messages to database since API failed
+                                        if let Err(e) = db.upsert_messages(&thread_messages, &current_label_id).await {
+                                            eprintln!("Error restoring messages to DB: {}", e);
+                                        }
+                                        // Remove from recently_modified since operation failed
+                                        if let Ok(mut state) = sync_state_loop.lock() {
+                                            for id in &message_ids {
+                                                state.recently_modified.remove(id);
+                                            }
+                                        }
                                     }
-                                });
+                                }
                             }
-                            ui_state.messages.remove(ui_state.selected_message_index);
-                            if ui_state.selected_message_index >= ui_state.messages.len()
-                                && !ui_state.messages.is_empty()
-                            {
-                                ui_state.selected_message_index = ui_state.messages.len() - 1;
-                            }
+                            
+                            // Only update UI if API succeeded (or if no gmail client)
+                            if api_succeeded {
+                                ui_state.messages.remove(ui_state.selected_message_index);
+                                if ui_state.selected_message_index >= ui_state.messages.len()
+                                    && !ui_state.messages.is_empty()
+                                {
+                                    ui_state.selected_message_index = ui_state.messages.len() - 1;
+                                }
 
-                            // Refresh detail view
-                            if let Some(msg) =
-                                ui_state.messages.get(ui_state.selected_message_index)
-                            {
-                                ui_state.threaded_messages =
-                                    db.get_messages_by_thread(&msg.thread_id).await?;
-                            } else {
-                                ui_state.threaded_messages.clear();
+                                // Refresh detail view
+                                if let Some(msg) =
+                                    ui_state.messages.get(ui_state.selected_message_index)
+                                {
+                                    ui_state.threaded_messages =
+                                        db.get_messages_by_thread(&msg.thread_id).await?;
+                                } else {
+                                    ui_state.threaded_messages.clear();
+                                }
                             }
-
-                            // Clear any previous status message
-                            ui_state.status_message = None;
                         }
                     } else if matches_key(key, &config.keybindings.archive) {
-                        // Archive
+                        // Archive all messages in the thread
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
-                            let id = m.id.clone();
-                            if let Some(gmail) = &gmail_client {
-                                let gmail = gmail.clone();
-                                let db_url_str = db_url.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = gmail.archive_message(&id).await {
-                                        eprintln!("Error archiving message: {}", e);
-                                    }
-                                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
-                                        let _ =
-                                            db_clone.remove_label_from_message(&id, "INBOX").await;
-                                    }
-                                });
+                            let thread_id = m.thread_id.clone();
+                            
+                            // Get all messages in the thread from the database
+                            let thread_messages = db.get_messages_by_thread(&thread_id).await?;
+                            let message_ids: Vec<String> = thread_messages.iter().map(|m| m.id.clone()).collect();
+                            
+                            // Mark messages as recently modified to prevent sync from re-adding them
+                            if let Ok(mut state) = sync_state_loop.lock() {
+                                state.mark_modified_many(message_ids.clone());
                             }
-                            // Capture for undo BEFORE removing
-                            let original_index = ui_state.selected_message_index;
-                            ui_state.undo_stack.push(UndoableAction::Archive {
-                                message: m.clone(),
-                                original_index,
-                            });
-
-                            ui_state.messages.remove(ui_state.selected_message_index);
-                            if ui_state.selected_message_index >= ui_state.messages.len()
-                                && !ui_state.messages.is_empty()
-                            {
-                                ui_state.selected_message_index = ui_state.messages.len() - 1;
-                            }
-
-                            // Refresh detail view
-                            if let Some(msg) =
-                                ui_state.messages.get(ui_state.selected_message_index)
-                            {
-                                ui_state.threaded_messages =
-                                    db.get_messages_by_thread(&msg.thread_id).await?;
+                            
+                            // Determine which label to remove: INBOX normally, or Category label if viewing a Category
+                            let current_label_id = ui_state
+                                .labels
+                                .get(ui_state.selected_label_index)
+                                .map(|l| l.id.clone())
+                                .unwrap_or_else(|| "INBOX".to_string());
+                            
+                            // If viewing a Category label (CATEGORY_*), remove that label instead of INBOX
+                            // Otherwise, remove INBOX (standard archive behavior)
+                            let label_to_remove = if current_label_id.starts_with("CATEGORY_") {
+                                current_label_id.clone()
                             } else {
-                                ui_state.threaded_messages.clear();
+                                "INBOX".to_string()
+                            };
+                            
+                            // Remove the label from database SYNCHRONOUSLY to ensure consistency
+                            for id in &message_ids {
+                                if let Err(e) = db.remove_label_from_message(id, &label_to_remove).await {
+                                    eprintln!("Error removing {} label from DB: {}", label_to_remove, e);
+                                }
                             }
 
-                            // Clear any previous status message
-                            ui_state.status_message = None;
+                            // Call Gmail API and await result to ensure it succeeds
+                            let mut api_succeeded = true;
+                            if let Some(gmail) = &gmail_client {
+                                // If archiving from a Category, remove the category label from Gmail
+                                // Otherwise use standard archive (remove INBOX)
+                                let result = if current_label_id.starts_with("CATEGORY_") {
+                                    gmail.remove_label_from_messages(&message_ids, &current_label_id).await
+                                } else {
+                                    gmail.archive_messages(&message_ids).await
+                                };
+                                
+                                match result {
+                                    Ok(_) => {
+                                        ui_state.status_message = Some("Archived successfully".to_string());
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error archiving messages: {}", e);
+                                        ui_state.status_message = Some(format!("Archive failed: {}", e));
+                                        api_succeeded = false;
+                                        // Restore label since API failed
+                                        for id in &message_ids {
+                                            if let Err(e) = db.add_label_to_message(id, &label_to_remove).await {
+                                                eprintln!("Error restoring {} label: {}", label_to_remove, e);
+                                            }
+                                        }
+                                        // Remove from recently_modified since operation failed
+                                        if let Ok(mut state) = sync_state_loop.lock() {
+                                            for id in &message_ids {
+                                                state.recently_modified.remove(id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Only update UI if API succeeded (or if no gmail client)
+                            if api_succeeded {
+                                // Capture for undo BEFORE removing
+                                let original_index = ui_state.selected_message_index;
+                                ui_state.undo_stack.push(UndoableAction::Archive {
+                                    messages: thread_messages,
+                                    label_id: label_to_remove.clone(),
+                                    original_index,
+                                });
+
+                                ui_state.messages.remove(ui_state.selected_message_index);
+                                if ui_state.selected_message_index >= ui_state.messages.len()
+                                    && !ui_state.messages.is_empty()
+                                {
+                                    ui_state.selected_message_index = ui_state.messages.len() - 1;
+                                }
+
+                                // Refresh detail view
+                                if let Some(msg) =
+                                    ui_state.messages.get(ui_state.selected_message_index)
+                                {
+                                    ui_state.threaded_messages =
+                                        db.get_messages_by_thread(&msg.thread_id).await?;
+                                } else {
+                                    ui_state.threaded_messages.clear();
+                                }
+                            }
                         }
                     } else if matches_key(key, &config.keybindings.undo) {
                         // Undo - only in Messages or Details panel
@@ -721,56 +842,77 @@ async fn main() -> anyhow::Result<()> {
                             if let Some(action) = ui_state.undo_stack.pop() {
                                 let description = action.description();
                                 match action {
-                                    UndoableAction::Delete { message, label_id, original_index } => {
+                                    UndoableAction::Delete { messages, label_id, original_index } => {
+                                        // Get the representative message (first one) for UI insertion
+                                        let representative = messages.first().cloned().unwrap_or_default();
+                                        
                                         // Re-insert into UI at original position (clamped to list size)
                                         let insert_index = original_index.min(ui_state.messages.len());
-                                        ui_state.messages.insert(insert_index, message.clone());
+                                        ui_state.messages.insert(insert_index, representative.clone());
                                         ui_state.selected_message_index = insert_index;
 
-                                        // Re-insert into database
-                                        let _ = db.upsert_messages(&[message.clone()], &label_id).await;
+                                        // Re-insert all messages into database
+                                        let _ = db.upsert_messages(&messages, &label_id).await;
 
-                                        // Untrash via Gmail API
+                                        // Untrash all messages via Gmail API
                                         if let Some(gmail) = &gmail_client {
                                             let gmail = gmail.clone();
-                                            let id = message.id.clone();
+                                            let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
                                             tokio::spawn(async move {
-                                                let _ = gmail.untrash_message(&id).await;
+                                                for id in ids {
+                                                    let _ = gmail.untrash_message(&id).await;
+                                                }
                                             });
                                         }
 
                                         // Refresh detail view
                                         ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&message.thread_id).await?;
+                                            db.get_messages_by_thread(&representative.thread_id).await?;
                                     }
-                                    UndoableAction::Archive { message, original_index } => {
-                                        // Re-insert into UI at original position (only if viewing INBOX)
+                                    UndoableAction::Archive { messages, label_id, original_index } => {
+                                        // Get the representative message (first one) for UI insertion
+                                        let representative = messages.first().cloned().unwrap_or_default();
+
+                                        // Re-insert into UI at original position (only if viewing the same label)
                                         let current_label = ui_state
                                             .labels
                                             .get(ui_state.selected_label_index)
                                             .map(|l| l.id.as_str());
-                                        if current_label == Some("INBOX") {
+                                        if current_label == Some(&label_id) {
                                             let insert_index = original_index.min(ui_state.messages.len());
-                                            ui_state.messages.insert(insert_index, message.clone());
+                                            ui_state.messages.insert(insert_index, representative.clone());
                                             ui_state.selected_message_index = insert_index;
                                         }
 
-                                        // Re-add INBOX label in database
-                                        let _ = db.add_label_to_message(&message.id, "INBOX").await;
+                                        // Re-add the removed label in database for all messages
+                                        for message in &messages {
+                                            let _ = db.add_label_to_message(&message.id, &label_id).await;
+                                        }
 
-                                        // Unarchive via Gmail API
+                                        // Restore label via Gmail API
                                         if let Some(gmail) = &gmail_client {
                                             let gmail = gmail.clone();
-                                            let id = message.id.clone();
+                                            let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+                                            let label_to_restore = label_id.clone();
                                             tokio::spawn(async move {
-                                                let _ = gmail.unarchive_message(&id).await;
+                                                if label_to_restore == "INBOX" {
+                                                    // Use unarchive for INBOX
+                                                    for id in ids {
+                                                        let _ = gmail.unarchive_message(&id).await;
+                                                    }
+                                                } else {
+                                                    // Use add_label_to_message for other labels (like categories)
+                                                    for id in ids {
+                                                        let _ = gmail.add_label_to_message(&id, &label_to_restore).await;
+                                                    }
+                                                }
                                             });
                                         }
 
                                         // Refresh detail view if message was re-added
-                                        if current_label == Some("INBOX") {
+                                        if current_label == Some(&label_id) {
                                             ui_state.threaded_messages =
-                                                db.get_messages_by_thread(&message.thread_id).await?;
+                                                db.get_messages_by_thread(&representative.thread_id).await?;
                                         }
                                     }
                                 }

@@ -11,7 +11,7 @@ pub struct Label {
     pub display_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
     pub id: String,
     pub thread_id: String,
