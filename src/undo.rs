@@ -4,9 +4,16 @@ use crate::models::Message;
 #[derive(Debug, Clone)]
 pub enum UndoableAction {
     /// Message was deleted (moved to trash)
-    Delete { message: Message, label_id: String },
+    Delete {
+        message: Message,
+        label_id: String,
+        original_index: usize,
+    },
     /// Message was archived (INBOX label removed)
-    Archive { message: Message },
+    Archive {
+        message: Message,
+        original_index: usize,
+    },
 }
 
 impl UndoableAction {

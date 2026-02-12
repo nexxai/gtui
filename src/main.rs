@@ -564,9 +564,11 @@ async fn main() -> anyhow::Result<()> {
                                 .get(ui_state.selected_label_index)
                                 .map(|l| l.id.clone())
                                 .unwrap_or_else(|| "INBOX".to_string());
+                            let original_index = ui_state.selected_message_index;
                             ui_state.undo_stack.push(UndoableAction::Delete {
                                 message: m.clone(),
                                 label_id: current_label_id,
+                                original_index,
                             });
 
                             let id = m.id.clone();
@@ -620,8 +622,10 @@ async fn main() -> anyhow::Result<()> {
                                 });
                             }
                             // Capture for undo BEFORE removing
+                            let original_index = ui_state.selected_message_index;
                             ui_state.undo_stack.push(UndoableAction::Archive {
                                 message: m.clone(),
+                                original_index,
                             });
 
                             ui_state.messages.remove(ui_state.selected_message_index);
@@ -653,10 +657,11 @@ async fn main() -> anyhow::Result<()> {
                             if let Some(action) = ui_state.undo_stack.pop() {
                                 let description = action.description();
                                 match action {
-                                    UndoableAction::Delete { message, label_id } => {
-                                        // Re-insert into UI at top
-                                        ui_state.messages.insert(0, message.clone());
-                                        ui_state.selected_message_index = 0;
+                                    UndoableAction::Delete { message, label_id, original_index } => {
+                                        // Re-insert into UI at original position (clamped to list size)
+                                        let insert_index = original_index.min(ui_state.messages.len());
+                                        ui_state.messages.insert(insert_index, message.clone());
+                                        ui_state.selected_message_index = insert_index;
 
                                         // Re-insert into database
                                         let _ = db.upsert_messages(&[message.clone()], &label_id).await;
@@ -674,15 +679,16 @@ async fn main() -> anyhow::Result<()> {
                                         ui_state.threaded_messages =
                                             db.get_messages_by_thread(&message.thread_id).await?;
                                     }
-                                    UndoableAction::Archive { message } => {
-                                        // Re-insert into UI at top (only if viewing INBOX)
+                                    UndoableAction::Archive { message, original_index } => {
+                                        // Re-insert into UI at original position (only if viewing INBOX)
                                         let current_label = ui_state
                                             .labels
                                             .get(ui_state.selected_label_index)
                                             .map(|l| l.id.as_str());
                                         if current_label == Some("INBOX") {
-                                            ui_state.messages.insert(0, message.clone());
-                                            ui_state.selected_message_index = 0;
+                                            let insert_index = original_index.min(ui_state.messages.len());
+                                            ui_state.messages.insert(insert_index, message.clone());
+                                            ui_state.selected_message_index = insert_index;
                                         }
 
                                         // Re-add INBOX label in database
