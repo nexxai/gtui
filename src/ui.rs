@@ -242,7 +242,7 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
     // Panel 3: Thread Details
     let details_block = Block::default()
         .borders(Borders::ALL)
-        .title("Conversation Context")
+        .title("Message Details")
         .border_style(if state.focused_panel == FocusedPanel::Details {
             Style::default()
                 .fg(Color::Yellow)
