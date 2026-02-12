@@ -3,10 +3,10 @@ use crate::sync::SyncState;
 use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use std::sync::{Arc, Mutex};
 use tui_textarea::TextArea;
@@ -168,7 +168,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .map(|(i, l)| {
             let style = if i == state.selected_label_index {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -183,7 +183,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .title("Labels")
         .border_style(if state.focused_panel == FocusedPanel::Labels {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
@@ -211,7 +211,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             let time_str = date.format("%b %d %Y @ %-I:%M%p").to_string();
 
             let mut style = if i == state.selected_message_index {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(Color::Blue)
             } else {
                 Style::default()
             };
@@ -264,7 +264,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .title(messages_title)
         .border_style(if state.focused_panel == FocusedPanel::Messages {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
@@ -301,7 +301,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         let status_style = if is_synced {
             Style::default().fg(Color::DarkGray)
         } else {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Color::Blue)
         };
 
         let status_paragraph = Paragraph::new(status_text)
@@ -337,7 +337,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .title("Message Details")
         .border_style(if state.focused_panel == FocusedPanel::Details {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
@@ -555,7 +555,7 @@ fn render_authentication(f: &mut Frame, state: &mut UIState<'_>) {
         let url_p = Paragraph::new(url.as_str())
             .style(
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Blue)
                     .add_modifier(Modifier::UNDERLINED),
             )
             .block(Block::default().borders(Borders::ALL).title(" URL "))
