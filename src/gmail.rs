@@ -1,5 +1,6 @@
 use crate::models;
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose};
 use google_gmail1::Gmail;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
@@ -140,8 +141,13 @@ impl GmailClient {
             body_html: None,
             is_read: !msg
                 .label_ids
-                .unwrap_or_default()
+                .as_ref()
+                .unwrap_or(&vec![])
                 .contains(&"UNREAD".to_string()),
+            has_sent_reply: msg
+                .label_ids
+                .unwrap_or_default()
+                .contains(&"SENT".to_string()),
         })
     }
 
@@ -214,11 +220,11 @@ impl GmailClient {
         bcc: &str,
         subject: &str,
         body: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let mut headers = vec![
             format!("From: me"),
             format!("To: {}", to),
-            format!("Subject: {}", subject),
+            format!("Subject: {}", encode_header_value(subject)),
         ];
 
         if !cc.is_empty() {
@@ -274,9 +280,10 @@ impl GmailClient {
             }
         }
 
-        result.context("Failed to send message")?;
-
-        Ok(())
+        let response = result.context("Failed to send message")?;
+        
+        // Return the sent message ID so it can be fetched and stored
+        Ok(response.1.id)
     }
 
     pub async fn mark_as_read(&self, id: &str) -> Result<()> {
@@ -321,6 +328,20 @@ impl GmailClient {
             }
         }
     }
+}
+
+/// Encode a header value using RFC 2047 MIME encoded-word syntax if it contains non-ASCII characters.
+/// This ensures proper handling of special characters like curly quotes in email subjects.
+fn encode_header_value(value: &str) -> String {
+    // Check if the string contains any non-ASCII characters
+    if value.is_ascii() {
+        return value.to_string();
+    }
+    
+    // Use Base64 encoding for the header (RFC 2047)
+    // Format: =?charset?encoding?encoded_text?=
+    let encoded = general_purpose::STANDARD.encode(value.as_bytes());
+    format!("=?UTF-8?B?{}?=", encoded)
 }
 
 fn convert_html_to_plain_text(html: &str) -> String {

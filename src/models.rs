@@ -23,4 +23,7 @@ pub struct Message {
     pub body_plain: Option<String>,
     pub body_html: Option<String>,
     pub is_read: bool,
+    /// Whether this conversation contains a sent reply from the user
+    #[sqlx(default)]
+    pub has_sent_reply: bool,
 }

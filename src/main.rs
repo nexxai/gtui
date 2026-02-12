@@ -728,8 +728,21 @@ async fn main() -> anyhow::Result<()> {
                                     cs.get_body(),
                                 );
                                 let gmail = gmail.clone();
+                                let db_url_str = db_url.clone();
+                                let refresh_tx_clone = refresh_tx.clone();
                                 tokio::spawn(async move {
-                                    let _ = gmail.send_message(&to, &cc, &bcc, &sub, &body).await;
+                                    // Send the message and get its ID
+                                    if let Ok(Some(msg_id)) = gmail.send_message(&to, &cc, &bcc, &sub, &body).await {
+                                        // Fetch the sent message to get full details including thread_id
+                                        if let Ok(sent_msg) = gmail.get_message(&msg_id).await {
+                                            // Store in database with SENT label
+                                            if let Ok(db_clone) = db::Database::new(&db_url_str).await {
+                                                let _ = db_clone.upsert_messages(&[sent_msg], "SENT").await;
+                                                // Trigger a refresh so the UI updates
+                                                let _ = refresh_tx_clone.send(()).await;
+                                            }
+                                        }
+                                    }
                                 });
                             }
                         }

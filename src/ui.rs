@@ -221,10 +221,13 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
                 style = style.add_modifier(Modifier::BOLD);
             }
 
+            // Reply indicator emoji if the thread contains a sent message
+            let reply_indicator = if m.has_sent_reply { "↩ " } else { "" };
+
             // Truncate to fit if necessary (crude)
             let s_label = format!(" From: {}", sender);
             let t_label = format!(" Time: {}", time_str);
-            let sub_label = format!(" Subj: {}", subject);
+            let sub_label = format!(" {}Subj: {}", reply_indicator, subject);
 
             let pad = |s: String, len: usize| {
                 let char_count = s.chars().count();
