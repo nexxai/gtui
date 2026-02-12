@@ -146,14 +146,17 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
 
-                                    // CRITICAL FIX: Only set oldest_date to 0 if we know we have the ENTIRE folder.
-                                    // If there's a next page, we only know about messages newer than the oldest one we fetched.
-                                    if next_page_token.is_none() && !ids.is_empty() {
-                                        oldest_date = 0;
-                                    } else if ids.is_empty() {
-                                        // If the folder is empty on remote, it should be empty locally too.
-                                        oldest_date = 0;
-                                    }
+                                    // Only perform removal if we have the COMPLETE picture from Gmail
+                                    // (no next page token means we got all results) AND we actually got results.
+                                    // If there's a next_page_token, we only have a partial view
+                                    // and MUST NOT remove anything — doing so would incorrectly
+                                    // strip labels from messages outside the partial window.
+                                    let should_remove = next_page_token.is_none() && !ids.is_empty();
+
+                                    sync_client.debug_log(&format!(
+                                        "SYNC {}: {} remote IDs, next_page={}, oldest_date={}, should_remove={}",
+                                        label_id, ids.len(), next_page_token.is_some(), oldest_date, should_remove
+                                    ));
 
                                     let _ = sync_db.upsert_messages(&messages, label_id).await;
                                     if !messages.is_empty() {
@@ -161,24 +164,29 @@ async fn main() -> anyhow::Result<()> {
                                     }
 
                                     // Detection of removals (archived/deleted from other clients)
-                                    if let Ok(local_info) = sync_db
-                                        .get_messages_with_dates_by_label(label_id, 200)
-                                        .await
-                                    {
-                                        for (local_id, local_date) in local_info {
-                                            // Only remove if we are sure it SHOULD be in our results window
-                                            if local_date >= oldest_date
-                                                && !remote_ids.contains(&local_id)
-                                            {
-                                                if let Ok(_) = sync_db
-                                                    .remove_label_from_message(&local_id, label_id)
-                                                    .await
+                                    // Only do this if we have the complete remote picture
+                                    if should_remove {
+                                        if let Ok(local_info) = sync_db
+                                            .get_messages_with_dates_by_label(label_id, 200)
+                                            .await
+                                        {
+                                            for (local_id, local_date) in local_info {
+                                                // Only remove if the message is within the date range
+                                                // of what the remote returned (i.e. it SHOULD have been
+                                                // in the remote set if it still had this label)
+                                                if local_date >= oldest_date
+                                                    && !remote_ids.contains(&local_id)
                                                 {
-                                                    has_new_data = true;
-                                                    sync_client.debug_log(&format!(
-                                                        "REMOVAL: Confirmed {} missing from {} (older_than: {})", 
-                                                        local_id, label_id, oldest_date
-                                                    ));
+                                                    if let Ok(_) = sync_db
+                                                        .remove_label_from_message(&local_id, label_id)
+                                                        .await
+                                                    {
+                                                        has_new_data = true;
+                                                        sync_client.debug_log(&format!(
+                                                            "REMOVAL: Confirmed {} missing from {} (oldest_date: {})", 
+                                                            local_id, label_id, oldest_date
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
@@ -212,8 +220,12 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Check for sync refresh
+        // Check for sync refresh — drain all pending signals, then reload once
+        let mut needs_refresh = false;
         while let Ok(()) = refresh_rx.try_recv() {
+            needs_refresh = true;
+        }
+        if needs_refresh {
             // Re-load labels
             ui_state.labels = db.get_labels().await?;
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
@@ -243,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        terminal.draw(|f| ui::render(f, &ui_state))?;
+        terminal.draw(|f| ui::render(f, &mut ui_state))?;
 
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;

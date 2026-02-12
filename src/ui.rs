@@ -4,7 +4,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
@@ -48,6 +48,7 @@ pub struct UIState {
     pub threaded_messages: Vec<models::Message>,
     pub selected_label_index: usize,
     pub selected_message_index: usize,
+    pub messages_list_state: ListState,
     pub detail_scroll: u16,
     pub focused_panel: FocusedPanel,
     pub mode: UIMode,
@@ -64,6 +65,7 @@ impl Default for UIState {
             threaded_messages: Vec::new(),
             selected_label_index: 0,
             selected_message_index: 0,
+            messages_list_state: ListState::default(),
             detail_scroll: 0,
             focused_panel: FocusedPanel::Messages,
             mode: UIMode::Browsing,
@@ -74,7 +76,7 @@ impl Default for UIState {
     }
 }
 
-pub fn render(f: &mut Frame, state: &UIState) {
+pub fn render(f: &mut Frame, state: &mut UIState) {
     if let UIMode::Authentication = state.mode {
         render_authentication(f, state);
         return;
@@ -187,7 +189,8 @@ pub fn render(f: &mut Frame, state: &UIState) {
         });
 
     let list_widget = List::new(msg_items).block(messages_block);
-    f.render_widget(list_widget, chunks[1]);
+    state.messages_list_state.select(Some(state.selected_message_index));
+    f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
 
     // Panel 3: Thread Details
     let details_block = Block::default()
@@ -369,7 +372,7 @@ pub fn render(f: &mut Frame, state: &UIState) {
     }
 }
 
-fn render_authentication(f: &mut Frame, state: &UIState) {
+fn render_authentication(f: &mut Frame, state: &mut UIState) {
     let area = centered_rect(60, 40, f.size());
     f.render_widget(Clear, area);
 
