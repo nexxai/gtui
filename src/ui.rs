@@ -157,8 +157,10 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             let sub_label = format!(" Subj: {}", subject);
 
             let pad = |s: String, len: usize| {
-                if s.len() > len {
-                    format!("{}...", &s[..len.saturating_sub(3)])
+                let char_count = s.chars().count();
+                if char_count > len {
+                    let truncated: String = s.chars().take(len.saturating_sub(3)).collect();
+                    format!("{}...", truncated)
                 } else {
                     format!("{:width$}", s, width = len)
                 }
