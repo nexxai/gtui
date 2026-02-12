@@ -1,5 +1,6 @@
 use crate::models;
 use anyhow::Result;
+use inflections::case::to_title_case;
 use sqlx::{Row, sqlite::SqlitePool};
 
 pub struct Database {
@@ -123,6 +124,7 @@ impl Database {
                 label_type: row.get(2),
                 color_foreground: row.get(3),
                 color_background: row.get(4),
+                display_name: to_title_case(&row.get::<'_, String, _>(1)),
             })
             .collect();
 

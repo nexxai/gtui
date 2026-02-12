@@ -108,7 +108,8 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             } else {
                 Style::default()
             };
-            ListItem::new(l.name.clone()).style(style)
+
+            ListItem::new(l.display_name.clone()).style(style)
         })
         .collect();
 
@@ -200,7 +201,7 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
         let current_label_name = state
             .labels
             .get(state.selected_label_index)
-            .map(|l| l.name.clone())
+            .map(|l| l.display_name.clone())
             .unwrap_or_default();
 
         let is_synced = if let Some(ref label_id) = current_label_id {
@@ -216,10 +217,7 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
         let status_text = if is_synced {
             "No conversations".to_string()
         } else {
-            format!(
-                "\n\n  ⏳ Syncing \"{}\"…\n\n  Please wait.",
-                current_label_name
-            )
+            format!("⏳ Syncing \"{}\"…\n\n  Please wait.", current_label_name)
         };
 
         let status_style = if is_synced {

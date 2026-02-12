@@ -7,6 +7,8 @@ pub struct Label {
     pub label_type: String, // 'system' or 'user'
     pub color_foreground: Option<String>,
     pub color_background: Option<String>,
+    #[sqlx(default)]
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

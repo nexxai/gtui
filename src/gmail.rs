@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use google_gmail1::Gmail;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
+use inflections::case::to_title_case;
 
 #[derive(Clone)]
 pub struct GmailClient {
@@ -26,7 +27,10 @@ impl GmailClient {
 
         if let Some(alias_list) = aliases.send_as {
             // Find the primary alias
-            if let Some(primary) = alias_list.into_iter().find(|a| a.is_primary.unwrap_or(false)) {
+            if let Some(primary) = alias_list
+                .into_iter()
+                .find(|a| a.is_primary.unwrap_or(false))
+            {
                 return Ok(primary.signature.map(|s| convert_html_to_plain_text(&s)));
             }
         }
@@ -48,10 +52,11 @@ impl GmailClient {
             .into_iter()
             .map(|l| models::Label {
                 id: l.id.unwrap_or_default(),
-                name: l.name.unwrap_or_default(),
+                name: l.name.clone().unwrap_or_default(),
                 label_type: l.type_.unwrap_or_default(),
                 color_foreground: l.color.as_ref().and_then(|c| c.text_color.clone()),
                 color_background: l.color.as_ref().and_then(|c| c.background_color.clone()),
+                display_name: to_title_case(l.name.as_deref().unwrap_or_default()),
             })
             .collect();
 
