@@ -37,18 +37,19 @@ project root.
 
 ### Default Keybindings
 
-| Action             | Keys                   |
-| :----------------- | :--------------------- |
-| **Quit**           | `q`                    |
-| **Next Panel**     | `l`, `Right`, `Tab`    |
-| **Previous Panel** | `h`, `Left`, `BackTab` |
-| **Move Up**        | `k`, `Up`              |
-| **Move Down**      | `j`, `Down`            |
-| **Mark as Read**   | `Space`                |
-| **New Message**    | `n`                    |
-| **Reply**          | `r`                    |
-| **Delete**         | `Backspace`, `d`       |
-| **Archive**        | `a`                    |
+| Action                  | Keys                   |
+| :---------------------- | :--------------------- |
+| **Quit**                | `q`                    |
+| **Next Panel**          | `l`, `Right`, `Tab`    |
+| **Previous Panel**      | `h`, `Left`, `BackTab` |
+| **Move Up**             | `k`, `Up`              |
+| **Move Down**           | `j`, `Down`            |
+| **Mark as Read**        | `Space`                |
+| **New Message**         | `n`                    |
+| **Reply**               | `r`                    |
+| **Delete**              | `Backspace`, `d`       |
+| **Archive**             | `a`                    |
+| **Undo Delete/Archive** | `u`                    |
 
 ### Customizing Keybindings
 
