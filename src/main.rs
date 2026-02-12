@@ -116,9 +116,10 @@ async fn main() -> anyhow::Result<()> {
                             if let Ok(l) = sync_client.list_labels().await {
                                 let _ = sync_db.upsert_labels(&l).await;
                                 has_new_data = true;
-                            }
 
-                            for label_id in &["INBOX", "SENT"] {
+                            // Sync messages for ALL labels (not just INBOX/SENT)
+                            let label_ids: Vec<String> = l.iter().map(|label| label.id.clone()).collect();
+                            for label_id in &label_ids {
                                 if let Ok((ids, next_page_token)) = sync_client
                                     .list_messages(vec![label_id.to_string()], 100, None)
                                     .await
@@ -192,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
                                     }
                                 }
+                            }
                             }
 
                             if has_new_data {
