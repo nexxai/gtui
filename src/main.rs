@@ -640,6 +640,69 @@ async fn main() -> anyhow::Result<()> {
                             // Clear any previous status message
                             ui_state.status_message = None;
                         }
+                    } else if matches_key(key, &config.keybindings.undo) {
+                        // Undo - only in Messages or Details panel
+                        if matches!(
+                            ui_state.focused_panel,
+                            FocusedPanel::Messages | FocusedPanel::Details
+                        ) {
+                            if let Some(action) = ui_state.undo_stack.pop() {
+                                let description = action.description();
+                                match action {
+                                    UndoableAction::Delete { message, label_id } => {
+                                        // Re-insert into UI at top
+                                        ui_state.messages.insert(0, message.clone());
+                                        ui_state.selected_message_index = 0;
+
+                                        // Re-insert into database
+                                        let _ = db.upsert_messages(&[message.clone()], &label_id).await;
+
+                                        // Untrash via Gmail API
+                                        if let Some(gmail) = &gmail_client {
+                                            let gmail = gmail.clone();
+                                            let id = message.id.clone();
+                                            tokio::spawn(async move {
+                                                let _ = gmail.untrash_message(&id).await;
+                                            });
+                                        }
+
+                                        // Refresh detail view
+                                        ui_state.threaded_messages =
+                                            db.get_messages_by_thread(&message.thread_id).await?;
+                                    }
+                                    UndoableAction::Archive { message } => {
+                                        // Re-insert into UI at top (only if viewing INBOX)
+                                        let current_label = ui_state
+                                            .labels
+                                            .get(ui_state.selected_label_index)
+                                            .map(|l| l.id.as_str());
+                                        if current_label == Some("INBOX") {
+                                            ui_state.messages.insert(0, message.clone());
+                                            ui_state.selected_message_index = 0;
+                                        }
+
+                                        // Re-add INBOX label in database
+                                        let _ = db.add_label_to_message(&message.id, "INBOX").await;
+
+                                        // Unarchive via Gmail API
+                                        if let Some(gmail) = &gmail_client {
+                                            let gmail = gmail.clone();
+                                            let id = message.id.clone();
+                                            tokio::spawn(async move {
+                                                let _ = gmail.unarchive_message(&id).await;
+                                            });
+                                        }
+
+                                        // Refresh detail view if message was re-added
+                                        if current_label == Some("INBOX") {
+                                            ui_state.threaded_messages =
+                                                db.get_messages_by_thread(&message.thread_id).await?;
+                                        }
+                                    }
+                                }
+                                ui_state.status_message = Some(format!("Undone: {}", description));
+                            }
+                        }
                     }
                 }
                 ui::UIMode::Composing => match key.code {
