@@ -615,6 +615,11 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 });
                             }
+                            // Capture for undo BEFORE removing
+                            ui_state.undo_stack.push(UndoableAction::Archive {
+                                message: m.clone(),
+                            });
+
                             ui_state.messages.remove(ui_state.selected_message_index);
                             if ui_state.selected_message_index >= ui_state.messages.len()
                                 && !ui_state.messages.is_empty()
@@ -631,6 +636,9 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 ui_state.threaded_messages.clear();
                             }
+
+                            // Clear any previous status message
+                            ui_state.status_message = None;
                         }
                     }
                 }
