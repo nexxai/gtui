@@ -186,9 +186,15 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
         })
         .collect();
 
+    let messages_title = if let Some(ref status) = state.status_message {
+        format!("Conversations - {}", status)
+    } else {
+        "Conversations".to_string()
+    };
+
     let messages_block = Block::default()
         .borders(Borders::ALL)
-        .title("Conversations")
+        .title(messages_title)
         .border_style(if state.focused_panel == FocusedPanel::Messages {
             Style::default()
                 .fg(Color::Yellow)
