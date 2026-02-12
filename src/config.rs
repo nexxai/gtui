@@ -27,6 +27,7 @@ pub struct Keybindings {
     pub archive: Vec<String>,
     pub send_message: Vec<String>,
     pub quit: Vec<String>,
+    pub undo: Vec<String>,
 }
 
 impl Default for Config {
@@ -44,6 +45,7 @@ impl Default for Config {
                 archive: vec!["a".to_string()],
                 send_message: vec!["ctrl-s".to_string()],
                 quit: vec!["q".to_string()],
+                undo: vec!["u".to_string()],
             },
             signatures: Signatures::default(),
         }
