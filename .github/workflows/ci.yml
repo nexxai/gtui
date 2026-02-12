@@ -21,7 +21,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - run: cargo test
+      - run: cargo test --release
 
   release:
     if: github.ref == 'refs/heads/main'
