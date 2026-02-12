@@ -266,9 +266,11 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
                 "From: {}\nDate: {}\n\n{}\n",
                 sender,
                 time_str,
-                msg.body_plain
-                    .as_deref()
-                    .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
+                &clean_body(
+                    msg.body_plain
+                        .as_deref()
+                        .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
+                )
             ));
             detail_content
                 .push_str("\n------------------------------------------------------------\n\n");
@@ -482,4 +484,87 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn clean_body(body: &str) -> String {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    let mut result = String::with_capacity(normalized.len());
+
+    // Split by newline. This gives us lines, but also empty strings for consecutive newlines.
+    // We want to treat whitespace-only lines as empty lines.
+    let lines: Vec<&str> = normalized.split('\n').collect();
+
+    let mut consecutive_empty_lines = 0;
+    let mut first_content = true;
+
+    for line in lines {
+        let trimmed = line.trim_end();
+
+        if trimmed.is_empty() {
+            consecutive_empty_lines += 1;
+        } else {
+            // Found content line
+            if !first_content {
+                // Determine how many newlines to insert before this content.
+                // At least 1 (to separate from previous line), at most 2 (to allow one blank line).
+
+                // If we saw 0 empty lines between content, it means: Content\nContent
+                // We want 1 newline.
+                // If we saw 1 empty line between content, it means: Content\n\nContent
+                // We want 2 newlines.
+                // If we saw >1 empty lines/whitespace lines, we want max 2 newlines.
+
+                let newlines_to_add = std::cmp::min(consecutive_empty_lines + 1, 2);
+                for _ in 0..newlines_to_add {
+                    result.push('\n');
+                }
+            }
+
+            result.push_str(trimmed);
+            consecutive_empty_lines = 0;
+            first_content = false;
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_body_removes_extra_newlines() {
+        let input = "Line 1\n\n\nLine 2\n\n\n\nLine 3";
+        let expected = "Line 1\n\nLine 2\n\nLine 3";
+        assert_eq!(clean_body(input), expected);
+    }
+
+    #[test]
+    fn test_clean_body_normalizes_crlf() {
+        let input = "Line 1\r\n\r\n\r\nLine 2";
+        let expected = "Line 1\n\nLine 2";
+        assert_eq!(clean_body(input), expected);
+    }
+
+    #[test]
+    fn test_clean_body_handles_whitespace_lines() {
+        let input = "Line 1\n   \n\t\nLine 2";
+        let expected = "Line 1\n\nLine 2";
+        assert_eq!(clean_body(input), expected);
+    }
+
+    #[test]
+    fn test_clean_body_complex_mixed() {
+        let input = "Line 1\r\n        \r\n\r\n          \r\nLine 2";
+        let expected = "Line 1\n\nLine 2";
+        assert_eq!(clean_body(input), expected);
+    }
+
+    #[test]
+    fn test_clean_body_trims_lines() {
+        let input = "Line 1   \nLine 2\t";
+        let expected = "Line 1\nLine 2";
+        assert_eq!(clean_body(input), expected);
+    }
 }
