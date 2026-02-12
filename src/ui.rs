@@ -1,11 +1,12 @@
 use crate::models;
 use crate::sync::SyncState;
+use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    Frame,
 };
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +59,8 @@ pub struct UIState {
     pub auth_url: Option<String>,
     pub remote_signature: Option<String>,
     pub sync_state: Arc<Mutex<SyncState>>,
+    pub undo_stack: Vec<UndoableAction>,
+    pub status_message: Option<String>,
 }
 
 impl Default for UIState {
@@ -76,6 +79,8 @@ impl Default for UIState {
             auth_url: None,
             remote_signature: None,
             sync_state: Arc::new(Mutex::new(SyncState::default())),
+            undo_stack: Vec::new(),
+            status_message: None,
         }
     }
 }

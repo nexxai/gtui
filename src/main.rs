@@ -5,6 +5,7 @@ mod gmail;
 mod models;
 mod sync;
 mod ui;
+mod undo;
 
 use crate::config::{Config, matches_key};
 use crate::gmail::GmailClient;
