@@ -6,8 +6,9 @@ default-run = "gtui"
 
 [dependencies]
 # TUI and Terminal Handling
-ratatui = "0.26"
-crossterm = { version = "0.27", features = ["event-stream"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = "0.7"
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }
