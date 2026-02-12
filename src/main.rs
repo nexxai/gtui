@@ -10,6 +10,7 @@ mod undo;
 use crate::config::{Config, matches_key};
 use crate::gmail::GmailClient;
 use crate::ui::FocusedPanel;
+use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -553,6 +554,17 @@ async fn main() -> anyhow::Result<()> {
                     } else if matches_key(key, &config.keybindings.delete) {
                         // Delete
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
+                            // Capture for undo BEFORE removing
+                            let current_label_id = ui_state
+                                .labels
+                                .get(ui_state.selected_label_index)
+                                .map(|l| l.id.clone())
+                                .unwrap_or_else(|| "INBOX".to_string());
+                            ui_state.undo_stack.push(UndoableAction::Delete {
+                                message: m.clone(),
+                                label_id: current_label_id,
+                            });
+
                             let id = m.id.clone();
                             if let Some(gmail) = &gmail_client {
                                 let gmail = gmail.clone();
@@ -582,6 +594,9 @@ async fn main() -> anyhow::Result<()> {
                             } else {
                                 ui_state.threaded_messages.clear();
                             }
+
+                            // Clear any previous status message
+                            ui_state.status_message = None;
                         }
                     } else if matches_key(key, &config.keybindings.archive) {
                         // Archive
