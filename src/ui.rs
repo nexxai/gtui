@@ -1,6 +1,5 @@
 use crate::models;
 use crate::sync::SyncState;
-use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Local};
 use ratatui::{
     Frame,
@@ -8,6 +7,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FocusedPanel {
@@ -143,7 +143,7 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             let date = DateTime::from_timestamp_millis(m.internal_date)
                 .unwrap_or_default()
                 .with_timezone(&Local);
-            let time_str = date.format("%b %d %H:%M").to_string();
+            let time_str = date.format("%b %d %Y @ %-I:%M%p").to_string();
 
             let mut style = if i == state.selected_message_index {
                 Style::default().fg(Color::Yellow)
@@ -171,14 +171,11 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             };
 
             let inner_len = list_width.saturating_sub(2);
-            let line1 = format!("│{}│", pad(s_label, inner_len));
-            let line2 = format!("│{}│", pad(t_label, inner_len));
-            let line3 = format!("│{}│", pad(sub_label, inner_len));
+            let line1 = format!("{}", pad(s_label, inner_len));
+            let line2 = format!("{}", pad(t_label, inner_len));
+            let line3 = format!("{}", pad(sub_label, inner_len));
 
-            let item_text = format!(
-                "┌{}┐\n{}\n{}\n{}\n└{}┘\n",
-                border_line, line1, line2, line3, border_line
-            );
+            let item_text = format!("{}\n{}\n{}\n{}\n", line1, line2, line3, border_line);
             ListItem::new(item_text).style(style)
         })
         .collect();
@@ -219,7 +216,10 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
         let status_text = if is_synced {
             "No conversations".to_string()
         } else {
-            format!("\n\n  ⏳ Syncing \"{}\"…\n\n  Please wait.", current_label_name)
+            format!(
+                "\n\n  ⏳ Syncing \"{}\"…\n\n  Please wait.",
+                current_label_name
+            )
         };
 
         let status_style = if is_synced {
@@ -235,7 +235,9 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
         f.render_widget(status_paragraph, chunks[1]);
     } else {
         let list_widget = List::new(msg_items).block(messages_block);
-        state.messages_list_state.select(Some(state.selected_message_index));
+        state
+            .messages_list_state
+            .select(Some(state.selected_message_index));
         f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
     }
 
@@ -295,7 +297,7 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
                 constraints.push(Constraint::Length(3)); // Bcc
             }
             constraints.push(Constraint::Length(3)); // Subject
-            constraints.push(Constraint::Min(10));   // Body
+            constraints.push(Constraint::Min(10)); // Body
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -388,15 +390,12 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
             // Set cursor position based on focused field
             let (cursor_x, cursor_y) = match cs.focused_field {
                 ComposeField::To => (chunks[0].x + 1 + cs.cursor_index as u16, chunks[0].y + 1),
-                ComposeField::Cc => {
-                    (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1)
-                }
-                ComposeField::Bcc => {
-                    (chunks[2].x + 1 + cs.cursor_index as u16, chunks[2].y + 1)
-                }
-                ComposeField::Subject => {
-                    (chunks[sub_chunk_idx].x + 1 + cs.cursor_index as u16, chunks[sub_chunk_idx].y + 1)
-                }
+                ComposeField::Cc => (chunks[1].x + 1 + cs.cursor_index as u16, chunks[1].y + 1),
+                ComposeField::Bcc => (chunks[2].x + 1 + cs.cursor_index as u16, chunks[2].y + 1),
+                ComposeField::Subject => (
+                    chunks[sub_chunk_idx].x + 1 + cs.cursor_index as u16,
+                    chunks[sub_chunk_idx].y + 1,
+                ),
                 ComposeField::Body => {
                     let mut x = 0;
                     let mut y = 0;
@@ -411,7 +410,10 @@ pub fn render(f: &mut Frame, state: &mut UIState) {
                             x += 1;
                         }
                     }
-                    (chunks[body_chunk_idx].x + 1 + x as u16, chunks[body_chunk_idx].y + 1 + y as u16)
+                    (
+                        chunks[body_chunk_idx].x + 1 + x as u16,
+                        chunks[body_chunk_idx].y + 1 + y as u16,
+                    )
                 }
             };
             f.set_cursor(cursor_x, cursor_y);

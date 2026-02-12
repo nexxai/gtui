@@ -266,45 +266,19 @@ async fn main() -> anyhow::Result<()> {
             needs_refresh = true;
         }
         if needs_refresh {
-            if debug_logging {
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("gtui_debug.log")
-                {
-                    use std::io::Write;
-                    let _ = writeln!(file, "REFRESH TRIGGERED for UI");
-                }
-            }
-
-            // Re-load labelѕ
+            // Re-load labels
             ui_state.labels = db.get_labels().await?;
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                if debug_logging {
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("gtui_debug.log")
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(file, "Refreshing messages for label: {}", label.id);
-                    }
-                }
-
                 // Re-load messages for current label
-                let new_messages = db
+                let mut new_messages = db
                     .get_messages_by_label(&label.id, limit, current_offset)
                     .await?;
 
-                if debug_logging {
-                    if let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("gtui_debug.log")
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(file, "Got {} messages from DB (offset: {})", new_messages.len(), current_offset);
-                    }
+                // If we got no messages but have an offset, we might be scrolled past the end.
+                // Reset to 0 and try again.
+                if new_messages.is_empty() && current_offset > 0 {
+                    current_offset = 0;
+                    new_messages = db.get_messages_by_label(&label.id, limit, 0).await?;
                 }
 
                 // If the message list changed, we need to be careful with the selection index
