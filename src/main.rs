@@ -529,6 +529,74 @@ async fn main() -> anyhow::Result<()> {
                             compose.focused_field = ui::ComposeField::Body;
                             ui_state.compose_state = Some(compose);
                         }
+                    } else if matches_key(key, &config.keybindings.forward) {
+                        // Forward
+                        if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
+                            let subject = m.subject.as_deref().unwrap_or("");
+                            let new_subject = if subject.to_lowercase().starts_with("fwd:")
+                                || subject.to_lowercase().starts_with("fw:")
+                            {
+                                subject.to_string()
+                            } else {
+                                format!("Fwd: {}", subject)
+                            };
+
+                            // Build forwarded body
+                            let mut forward_body = String::new();
+
+                            // Two blank lines at top for user's context
+                            forward_body.push_str("\n\n");
+
+                            // Add signature (new_message signature for forwards)
+                            let sig_to_use = ui_state
+                                .remote_signature
+                                .as_ref()
+                                .or(config.signatures.new_message.as_ref());
+                            if let Some(sig) = sig_to_use {
+                                forward_body.push_str("--\n");
+                                forward_body.push_str(sig);
+                                forward_body.push('\n');
+                            }
+
+                            // Forwarding header block
+                            forward_body.push_str("\n---------- Forwarded message ----------\n");
+                            forward_body.push_str(&format!(
+                                "From: {}\n",
+                                m.from_address.as_deref().unwrap_or("Unknown")
+                            ));
+
+                            let date = DateTime::from_timestamp_millis(m.internal_date)
+                                .unwrap_or_default()
+                                .with_timezone(&Local);
+                            forward_body.push_str(&format!(
+                                "Date: {}\n",
+                                date.format("%a, %b %d, %Y at %l:%M %p")
+                            ));
+
+                            forward_body.push_str(&format!("Subject: {}\n", subject));
+                            forward_body.push_str(&format!(
+                                "To: {}\n",
+                                m.to_address.as_deref().unwrap_or("Unknown")
+                            ));
+
+                            // Original message body
+                            let body_to_forward = m.body_plain.as_ref().or(m.snippet.as_ref());
+                            if let Some(body) = body_to_forward {
+                                forward_body.push_str(&format!("\n{}", body));
+                            }
+
+                            ui_state.mode = ui::UIMode::Composing;
+                            let _ = execute!(io::stdout(), crossterm::cursor::Show);
+                            let compose = ui::ComposeState::new(
+                                "",  // Empty To field
+                                "",
+                                "",
+                                &new_subject,
+                                &forward_body,
+                            );
+                            // Cursor starts in To field (default)
+                            ui_state.compose_state = Some(compose);
+                        }
                     } else if matches_key(key, &config.keybindings.new_message) {
                         // New message
                         ui_state.mode = ui::UIMode::Composing;

@@ -47,6 +47,7 @@ project root.
 | **Mark as Read**        | `Space`                |
 | **New Message**         | `n`                    |
 | **Reply**               | `r`                    |
+| **Forward**             | `f`                    |
 | **Delete**              | `Backspace`, `d`       |
 | **Archive**             | `a`                    |
 | **Undo Delete/Archive** | `u`                    |
@@ -90,7 +91,9 @@ Your Name"""
 - **CC/BCC Support**: Use `Ctrl+B` while composing to toggle optional CC and
   BCC fields.
 - **Automated Quoting**: Replies automatically include the full body of the
-  original message.
+   original message.
+- **Message Forwarding**: Forward emails with full context including original
+   sender, date, and subject information.
 - **Background Sync**: Keeps your local cache updated with the latest emails.
 
 ## Troubleshooting
