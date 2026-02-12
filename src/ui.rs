@@ -196,7 +196,6 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
 
     // Panel 2: Message List
     let list_width = chunks[1].width.saturating_sub(2) as usize; // Inset from sides
-    let border_line = "─".repeat(list_width.saturating_sub(2));
 
     let msg_items: Vec<ListItem> = state
         .messages
@@ -244,7 +243,12 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             let line2 = format!("{}", pad(t_label, inner_len));
             let line3 = format!("{}", pad(sub_label, inner_len));
 
-            let item_text = format!("{}\n{}\n{}\n{}\n", line1, line2, line3, border_line);
+            let is_selected = i == state.selected_message_index;
+            let indicator = if is_selected { "█" } else { " " };
+            let item_text = format!(
+                "{}{}\n{}{}\n{}{}",
+                indicator, line1, indicator, line2, indicator, line3
+            );
             ListItem::new(item_text).style(style)
         })
         .collect();
@@ -306,10 +310,24 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             .wrap(ratatui::widgets::Wrap { trim: true });
         f.render_widget(status_paragraph, chunks[1]);
     } else {
-        let list_widget = List::new(msg_items).block(messages_block);
-        state
-            .messages_list_state
-            .select(Some(state.selected_message_index));
+        // Insert separator items between conversations
+        let separator_width = list_width.saturating_sub(2);
+        let separator = "─".repeat(separator_width);
+        let mut items_with_separators: Vec<ListItem> = Vec::new();
+        for (i, item) in msg_items.into_iter().enumerate() {
+            items_with_separators.push(item);
+            // Add separator after each item except the last one
+            if i < state.messages.len().saturating_sub(1) {
+                items_with_separators.push(
+                    ListItem::new(separator.clone()).style(Style::default().fg(Color::DarkGray)),
+                );
+            }
+        }
+
+        let list_widget = List::new(items_with_separators).block(messages_block);
+        // Adjust index to account for separators (each message is followed by a separator)
+        let display_index = state.selected_message_index * 2;
+        state.messages_list_state.select(Some(display_index));
         f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
     }
 
