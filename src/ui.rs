@@ -11,6 +11,20 @@ use ratatui::{
 use std::sync::{Arc, Mutex};
 use tui_textarea::TextArea;
 
+/// Write to debug log file if debug mode is enabled
+fn debug_log(enabled: bool, msg: &str) {
+    if enabled {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("gtui_debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", msg);
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FocusedPanel {
     #[default]
@@ -121,6 +135,7 @@ pub struct UIState<'a> {
     pub sync_state: Arc<Mutex<SyncState>>,
     pub undo_stack: Vec<UndoableAction>,
     pub status_message: Option<String>,
+    pub debug_logging: bool,
 }
 
 impl<'a> Default for UIState<'a> {
@@ -141,6 +156,7 @@ impl<'a> Default for UIState<'a> {
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             undo_stack: Vec::new(),
             status_message: None,
+            debug_logging: false,
         }
     }
 }
@@ -332,6 +348,31 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     }
 
     // Panel 3: Thread Details
+    // Debug logging for border corruption investigation
+    debug_log(
+        state.debug_logging,
+        &format!(
+            "[UI Render] threaded_msgs: {}, selected_idx: {}, panel: {:?}",
+            state.threaded_messages.len(),
+            state.selected_message_index,
+            state.focused_panel
+        ),
+    );
+    if let Some(first_msg) = state.threaded_messages.first() {
+        let preview: String = first_msg
+            .body_plain
+            .as_ref()
+            .map(|s| s.chars().take(50).collect())
+            .unwrap_or_else(|| "(no body)".to_string());
+        debug_log(
+            state.debug_logging,
+            &format!(
+                "[UI Render] First msg from: {:?}, body preview: {:?}",
+                first_msg.from_address, preview
+            ),
+        );
+    }
+
     let details_block = Block::default()
         .borders(Borders::ALL)
         .title("Message Details")
@@ -367,6 +408,36 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             detail_content
                 .push_str("\n------------------------------------------------------------\n\n");
         }
+    }
+
+    // Clear the details area first to prevent rendering artifacts when scrolling fast
+    f.render_widget(Clear, chunks[2]);
+
+    // Debug: Log details panel dimensions and content stats
+    debug_log(
+        state.debug_logging,
+        &format!(
+            "[UI Render] Details panel - area: x={}, y={}, w={}, h={}, content_len={}",
+            chunks[2].x,
+            chunks[2].y,
+            chunks[2].width,
+            chunks[2].height,
+            detail_content.len()
+        ),
+    );
+    // Log any vertical bar characters in content that might be problematic
+    let vertical_bars: Vec<(usize, char)> = detail_content
+        .char_indices()
+        .filter(|(_, c)| *c == '│' || *c == '|')
+        .collect();
+    if !vertical_bars.is_empty() {
+        debug_log(
+            state.debug_logging,
+            &format!(
+                "[UI Render] WARNING: Found {} vertical bar chars in content",
+                vertical_bars.len()
+            ),
+        );
     }
 
     let detail_paragraph = Paragraph::new(detail_content)

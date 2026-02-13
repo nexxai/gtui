@@ -23,6 +23,20 @@ use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::sync::{Arc, Mutex};
 
+/// Write to debug log file if debug mode is enabled
+fn debug_log(enabled: bool, msg: &str) {
+    if enabled {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("gtui_debug.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", msg);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load();
@@ -50,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut ui_state = ui::UIState::default();
+    ui_state.debug_logging = debug_logging;
 
     // Shared sync state for UI awareness
     let sync_state = Arc::new(Mutex::new(sync::SyncState::default()));
@@ -338,11 +353,14 @@ async fn main() -> anyhow::Result<()> {
 
                     // Re-load threaded messages for selected message
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
+                        debug_log(debug_logging, &format!("[Main] Sync refresh loading thread_id: {:?}", msg.thread_id));
                         ui_state.threaded_messages =
                             db.get_messages_by_thread(&msg.thread_id).await?;
+                        debug_log(debug_logging, &format!("[Main] Sync refresh loaded {} messages", ui_state.threaded_messages.len()));
                     }
                 } else {
                     ui_state.selected_message_index = 0;
+                    debug_log(debug_logging, "[Main] Clearing threaded_messages (no messages in label)");
                     ui_state.threaded_messages.clear();
                 }
             }
@@ -417,13 +435,18 @@ async fn main() -> anyhow::Result<()> {
                                 if ui_state.selected_message_index
                                     < ui_state.messages.len().saturating_sub(1)
                                 {
+                                    let old_idx = ui_state.selected_message_index;
                                     ui_state.selected_message_index += 1;
                                     ui_state.detail_scroll = 0;
                                     if let Some(msg) =
                                         ui_state.messages.get(ui_state.selected_message_index)
                                     {
+                                        debug_log(debug_logging, &format!("[Main] Navigating: idx {} -> {}, thread_id: {:?}",
+                                            old_idx, ui_state.selected_message_index, msg.thread_id));
                                         ui_state.threaded_messages =
                                             db.get_messages_by_thread(&msg.thread_id).await?;
+                                        debug_log(debug_logging, &format!("[Main] Loaded {} messages for thread",
+                                            ui_state.threaded_messages.len()));
                                     }
 
                                     if ui_state.selected_message_index
