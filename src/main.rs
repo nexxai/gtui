@@ -656,6 +656,12 @@ async fn main() -> anyhow::Result<()> {
                             &body,
                         ));
                     } else if matches_key(key, &config.keybindings.delete) {
+                        // Do nothing if labels panel is active
+                        if ui_state.focused_panel == FocusedPanel::Labels {
+                            continue;
+                        }
+                        // Ensure conversations list is the active panel
+                        ui_state.focused_panel = FocusedPanel::Messages;
                         // Delete all messages in the thread
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let thread_id = m.thread_id.clone();
@@ -735,6 +741,12 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }
                     } else if matches_key(key, &config.keybindings.archive) {
+                        // Do nothing if labels panel is active
+                        if ui_state.focused_panel == FocusedPanel::Labels {
+                            continue;
+                        }
+                        // Ensure conversations list is the active panel
+                        ui_state.focused_panel = FocusedPanel::Messages;
                         // Archive all messages in the thread
                         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
                             let thread_id = m.thread_id.clone();
