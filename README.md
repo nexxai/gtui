@@ -22,7 +22,7 @@ vim-inspired interface.
    The first time you run the app, it will open your default web browser for
    Google authentication.
    ```bash
-    cargo run
+   cargo run
    ```
 3. **Permissions**:
    The app will request broad Gmail permissions to sync labels and send/read emails.
@@ -91,9 +91,9 @@ Your Name"""
 - **CC/BCC Support**: Use `Ctrl+B` while composing to toggle optional CC and
   BCC fields.
 - **Automated Quoting**: Replies automatically include the full body of the
-   original message.
+  original message.
 - **Message Forwarding**: Forward emails with full context including original
-   sender, date, and subject information.
+  sender, date, and subject information.
 - **Background Sync**: Keeps your local cache updated with the latest emails.
 
 ## Troubleshooting
