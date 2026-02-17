@@ -1,4 +1,5 @@
 [keybindings]
+quit = ["q"]
 next_panel = ["l", "Right", "Tab"]
 prev_panel = ["h", "Left", "BackTab"]
 move_up = ["k", "Up"]
@@ -9,7 +10,6 @@ reply = ["r"]
 forward = ["f"]
 delete = ["d"]
 archive = ["Backspace", "a"]
-quit = ["q"]
 send_message = ["cmd-enter", "ctrl-s"]
 
 sync_interval_seconds = 30

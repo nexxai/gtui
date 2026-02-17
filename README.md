@@ -37,7 +37,8 @@ project root.
 
 ### Sync Interval
 
-Control how often the background sync runs (in seconds):
+Control how often the background sync runs (in seconds) by setting
+`sync_interval_seconds` in `settings.toml`:
 
 ```toml
 sync_interval_seconds = 30
@@ -53,12 +54,12 @@ sync_interval_seconds = 30
 | **Move Up**             | `k`, `Up`              |
 | **Move Down**           | `j`, `Down`            |
 | **Mark as Read**        | `Space`                |
-| **New Message**         | `n`                    |
+| **New Message**         | `c`, `n`               |
 | **Reply**               | `r`                    |
 | **Forward**             | `f`                    |
-| **Delete**              | `Backspace`, `d`       |
-| **Archive**             | `a`                    |
-| **Undo Delete/Archive** | `u`                    |
+| **Delete**              | `d`                    |
+| **Archive**             | `Backspace`, `a`       |
+| **Send Message**        | `Cmd+Enter`, `Ctrl+S`  |
 
 ### Customizing Keybindings
 
@@ -85,6 +86,19 @@ reply = """
 
 Best,
 Your Name"""
+
+## Code Structure
+
+- **main.rs**: Entry point and startup wiring.
+- **auth.rs**: OAuth flow and token storage.
+- **gmail.rs**: Gmail API client logic.
+- **config.rs**: Settings and keybinding loading.
+- **db.rs**: SQLite cache access.
+- **models.rs**: Core data types.
+- **sync.rs**: Background sync loop and scheduling.
+- **ui.rs**: TUI layout and interaction.
+- **text.rs**: Formatting and rendering helpers.
+- **undo.rs**: Undo stack for destructive actions.
 ```
 
 ## Features
