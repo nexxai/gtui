@@ -811,4 +811,18 @@ mod tests {
         let expected = "Line 1\nLine 2";
         assert_eq!(clean_body(input), expected);
     }
+
+    #[test]
+    fn test_clean_body_drops_leading_trailing_blanks() {
+        let input = "\n\n Line 1\n\nLine 2\n\n";
+        let expected = " Line 1\n\nLine 2";
+        assert_eq!(clean_body(input), expected);
+    }
+
+    #[test]
+    fn test_clean_body_all_whitespace_is_empty() {
+        let input = " \n\t\n  ";
+        let expected = "";
+        assert_eq!(clean_body(input), expected);
+    }
 }
