@@ -19,12 +19,7 @@ impl Database {
     }
 
     pub async fn get_messages_by_thread(&self, thread_id: &str) -> Result<Vec<models::Message>> {
-        let rows = sqlx::query(
-            "SELECT id, thread_id, snippet, from_address, to_address, subject, internal_date, body_plain, body_html, is_read 
-             FROM messages 
-             WHERE thread_id = ?
-             ORDER BY internal_date DESC"
-        )
+        let rows = sqlx::query(include_str!("../sql/get_messages_by_thread.sql"))
         .bind(thread_id)
         .fetch_all(&self.pool)
         .await?;
@@ -59,12 +54,7 @@ impl Database {
 
     pub async fn upsert_labels(&self, labels: &[models::Label]) -> Result<()> {
         for label in labels {
-            sqlx::query(
-                "INSERT INTO labels (id, name, type, color_foreground, color_background) 
-                 VALUES (?, ?, ?, ?, ?) 
-                 ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, 
-                 color_foreground=excluded.color_foreground, color_background=excluded.color_background"
-            )
+            sqlx::query(include_str!("../sql/upsert_labels.sql"))
             .bind(&label.id)
             .bind(&label.name)
             .bind(&label.label_type)
@@ -82,12 +72,7 @@ impl Database {
         label_id: &str,
     ) -> Result<()> {
         for msg in messages {
-            sqlx::query(
-                "INSERT INTO messages (id, thread_id, snippet, from_address, to_address, subject, internal_date, body_plain, body_html, is_read) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
-                 ON CONFLICT(id) DO UPDATE SET snippet=excluded.snippet, is_read=excluded.is_read, 
-                 body_plain=excluded.body_plain, body_html=excluded.body_html"
-            )
+            sqlx::query(include_str!("../sql/upsert_messages.sql"))
             .bind(&msg.id)
             .bind(&msg.thread_id)
             .bind(&msg.snippet)
@@ -101,9 +86,7 @@ impl Database {
             .execute(&self.pool)
             .await?;
 
-            sqlx::query(
-                "INSERT OR IGNORE INTO message_labels (message_id, label_id) VALUES (?, ?)",
-            )
+            sqlx::query(include_str!("../sql/link_message_label.sql"))
             .bind(&msg.id)
             .bind(label_id)
             .execute(&self.pool)
@@ -113,9 +96,7 @@ impl Database {
     }
 
     pub async fn get_labels(&self) -> Result<Vec<models::Label>> {
-        let rows = sqlx::query(
-            "SELECT id, name, type as label_type, color_foreground, color_background FROM labels ORDER BY name ASC"
-        )
+        let rows = sqlx::query(include_str!("../sql/get_labels.sql"))
         .fetch_all(&self.pool)
         .await?;
 
@@ -151,20 +132,7 @@ impl Database {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<models::Message>> {
-        let rows = sqlx::query(
-            "SELECT m.id, m.thread_id, m.snippet, m.from_address, m.to_address, m.subject, MAX(m.internal_date) as latest_date, m.body_plain, m.body_html, m.is_read,
-             EXISTS (
-                 SELECT 1 FROM messages m2
-                 JOIN message_labels ml2 ON m2.id = ml2.message_id
-                 WHERE m2.thread_id = m.thread_id AND ml2.label_id = 'SENT'
-             ) as has_sent_reply
-             FROM messages m
-             JOIN message_labels ml ON m.id = ml.message_id
-             WHERE ml.label_id = ?
-             GROUP BY m.thread_id
-             ORDER BY latest_date DESC
-             LIMIT ? OFFSET ?"
-        )
+        let rows = sqlx::query(include_str!("../sql/get_messages_by_label.sql"))
         .bind(label_id)
         .bind(limit)
         .bind(offset)
@@ -196,14 +164,7 @@ impl Database {
         label_id: &str,
         limit: i64,
     ) -> Result<Vec<(String, i64)>> {
-        let rows = sqlx::query(
-            "SELECT m.id, m.internal_date 
-             FROM messages m
-             JOIN message_labels ml ON m.id = ml.message_id
-             WHERE ml.label_id = ?
-             ORDER BY m.internal_date DESC
-             LIMIT ?",
-        )
+        let rows = sqlx::query(include_str!("../sql/get_messages_with_dates_by_label.sql"))
         .bind(label_id)
         .bind(limit)
         .fetch_all(&self.pool)
@@ -213,7 +174,7 @@ impl Database {
     }
 
     pub async fn mark_message_as_read(&self, id: &str, is_read: bool) -> Result<()> {
-        sqlx::query("UPDATE messages SET is_read = ? WHERE id = ?")
+        sqlx::query(include_str!("../sql/mark_message_as_read.sql"))
             .bind(is_read)
             .bind(id)
             .execute(&self.pool)
@@ -222,7 +183,7 @@ impl Database {
     }
 
     pub async fn message_exists(&self, id: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT 1 FROM messages WHERE id = ?")
+        let row = sqlx::query(include_str!("../sql/message_exists.sql"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -230,7 +191,7 @@ impl Database {
     }
 
     pub async fn get_message_date(&self, id: &str) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT internal_date FROM messages WHERE id = ?")
+        let row = sqlx::query(include_str!("../sql/get_message_date.sql"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -243,11 +204,11 @@ impl Database {
     }
 
     pub async fn delete_message(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM message_labels WHERE message_id = ?")
+        sqlx::query(include_str!("../sql/delete_message_labels.sql"))
             .bind(id)
             .execute(&self.pool)
             .await?;
-        sqlx::query("DELETE FROM messages WHERE id = ?")
+        sqlx::query(include_str!("../sql/delete_message.sql"))
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -255,7 +216,7 @@ impl Database {
     }
 
     pub async fn remove_label_from_message(&self, message_id: &str, label_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM message_labels WHERE message_id = ? AND label_id = ?")
+        sqlx::query(include_str!("../sql/remove_label_from_message.sql"))
             .bind(message_id)
             .bind(label_id)
             .execute(&self.pool)
@@ -264,7 +225,7 @@ impl Database {
     }
 
     pub async fn add_label_to_message(&self, message_id: &str, label_id: &str) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO message_labels (message_id, label_id) VALUES (?, ?)")
+        sqlx::query(include_str!("../sql/add_label_to_message.sql"))
             .bind(message_id)
             .bind(label_id)
             .execute(&self.pool)
