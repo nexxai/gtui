@@ -235,7 +235,25 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         ])
         .split(f.area());
 
-    // Panel 1: Labels
+    render_labels_panel(f, state, chunks[0]);
+    render_messages_panel(f, state, chunks[1]);
+    render_details_panel(f, state, chunks[2]);
+    render_compose_popup(f, state);
+}
+
+const DETAIL_SEPARATOR: &str = "------------------------------------------------------------";
+
+fn focused_border_style(is_focused: bool) -> Style {
+    if is_focused {
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn render_labels_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
     let items: Vec<ListItem> = state
         .labels
         .iter()
@@ -256,21 +274,18 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     let labels_block = Block::default()
         .borders(Borders::ALL)
         .title("Labels")
-        .border_style(if state.focused_panel == FocusedPanel::Labels {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        });
+        .border_style(focused_border_style(
+            state.focused_panel == FocusedPanel::Labels,
+        ));
 
     let labels_list = List::new(items)
         .block(labels_block)
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
-    f.render_widget(labels_list, chunks[0]);
+    f.render_widget(labels_list, area);
+}
 
-    // Panel 2: Message List
-    let list_width = chunks[1].width.saturating_sub(2) as usize; // Inset from sides
+fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
+    let list_width = area.width.saturating_sub(2) as usize; // Inset from sides
 
     let msg_items: Vec<ListItem> = state
         .messages
@@ -337,13 +352,9 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     let messages_block = Block::default()
         .borders(Borders::ALL)
         .title(messages_title)
-        .border_style(if state.focused_panel == FocusedPanel::Messages {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        });
+        .border_style(focused_border_style(
+            state.focused_panel == FocusedPanel::Messages,
+        ));
 
     if state.messages.is_empty() {
         // Show sync status or "no conversations" message
@@ -383,7 +394,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             .block(messages_block)
             .style(status_style)
             .wrap(ratatui::widgets::Wrap { trim: true });
-        f.render_widget(status_paragraph, chunks[1]);
+        f.render_widget(status_paragraph, area);
     } else {
         // Insert separator items between conversations
         let separator_width = list_width.saturating_sub(2);
@@ -403,10 +414,11 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         // Adjust index to account for separators (each message is followed by a separator)
         let display_index = state.selected_message_index * 2;
         state.messages_list_state.select(Some(display_index));
-        f.render_stateful_widget(list_widget, chunks[1], &mut state.messages_list_state);
+        f.render_stateful_widget(list_widget, area, &mut state.messages_list_state);
     }
+}
 
-    // Panel 3: Thread Details
+fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
     // Debug logging for border corruption investigation
     logging::debug(
         state.debug_logging,
@@ -435,13 +447,9 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     let details_block = Block::default()
         .borders(Borders::ALL)
         .title("Message Details")
-        .border_style(if state.focused_panel == FocusedPanel::Details {
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        });
+        .border_style(focused_border_style(
+            state.focused_panel == FocusedPanel::Details,
+        ));
 
     let mut detail_content = String::new();
     if state.threaded_messages.is_empty() {
@@ -464,23 +472,24 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
                         .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
                 )
             ));
-            detail_content
-                .push_str("\n------------------------------------------------------------\n\n");
+            detail_content.push_str("\n");
+            detail_content.push_str(DETAIL_SEPARATOR);
+            detail_content.push_str("\n\n");
         }
     }
 
     // Clear the details area first to prevent rendering artifacts when scrolling fast
-    f.render_widget(Clear, chunks[2]);
+    f.render_widget(Clear, area);
 
     // Debug: Log details panel dimensions and content stats
     logging::debug(
         state.debug_logging,
         &format!(
             "[UI Render] Details panel - area: x={}, y={}, w={}, h={}, content_len={}",
-            chunks[2].x,
-            chunks[2].y,
-            chunks[2].width,
-            chunks[2].height,
+            area.x,
+            area.y,
+            area.width,
+            area.height,
             detail_content.len()
         ),
     );
@@ -503,8 +512,10 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .block(details_block)
         .wrap(ratatui::widgets::Wrap { trim: true })
         .scroll((state.detail_scroll, 0));
-    f.render_widget(detail_paragraph, chunks[2]);
+    f.render_widget(detail_paragraph, area);
+}
 
+fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
     // Popup for composing
     if let UIMode::Composing = state.mode {
         if let Some(cs) = &mut state.compose_state {
