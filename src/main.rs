@@ -157,55 +157,9 @@ async fn main() -> anyhow::Result<()> {
             needs_refresh = true;
         }
         if needs_refresh {
-            // Re-load labels
-            ui_state.labels = db.get_labels().await?;
-            if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                // Re-load messages for current label
-                let mut new_messages = db
-                    .get_messages_by_label(&label.id, limit, current_offset)
-                    .await?;
-
-                // If we got no messages but have an offset, we might be scrolled past the end.
-                // Reset to 0 and try again.
-                if new_messages.is_empty() && current_offset > 0 {
-                    current_offset = 0;
-                    new_messages = db.get_messages_by_label(&label.id, limit, 0).await?;
-                }
-
-                // If the message list changed, we need to be careful with the selection index
-                ui_state.messages = new_messages;
-
-                // Clamp selection index
-                if !ui_state.messages.is_empty() {
-                    if ui_state.selected_message_index >= ui_state.messages.len() {
-                        ui_state.selected_message_index = ui_state.messages.len().saturating_sub(1);
-                    }
-
-                    // Re-load threaded messages for selected message
-                    if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                        logging::debug(
-                            debug_logging,
-                            &format!("[Main] Sync refresh loading thread_id: {:?}", msg.thread_id),
-                        );
-                        ui_state.threaded_messages =
-                            db.get_messages_by_thread(&msg.thread_id).await?;
-                        logging::debug(
-                            debug_logging,
-                            &format!(
-                                "[Main] Sync refresh loaded {} messages",
-                                ui_state.threaded_messages.len()
-                            ),
-                        );
-                    }
-                } else {
-                    ui_state.selected_message_index = 0;
-                    logging::debug(
-                        debug_logging,
-                        "[Main] Clearing threaded_messages (no messages in label)",
-                    );
-                    ui_state.threaded_messages.clear();
-                }
-            }
+            ui_state
+                .refresh_labels_and_messages(&db, limit, &mut current_offset)
+                .await?;
         }
 
         terminal.draw(|f| ui::render(f, &mut ui_state))?;
@@ -257,20 +211,17 @@ async fn main() -> anyhow::Result<()> {
                                     < ui_state.labels.len().saturating_sub(1)
                                 {
                                     ui_state.selected_label_index += 1;
-                                    let label = &ui_state.labels[ui_state.selected_label_index];
+                                    let label_id = ui_state.labels[ui_state.selected_label_index]
+                                        .id
+                                        .clone();
                                     current_offset = 0;
                                     ui_state.messages = db
-                                        .get_messages_by_label(&label.id, limit, current_offset)
+                                        .get_messages_by_label(&label_id, limit, current_offset)
                                         .await?;
                                     ui_state.selected_message_index = 0;
                                     ui_state.detail_scroll = 0;
-                                    if let Some(msg) = ui_state.messages.get(0) {
-                                        ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&msg.thread_id).await?;
-                                    } else {
-                                        ui_state.threaded_messages.clear();
-                                    }
-                                    let _ = priority_tx.try_send(label.id.clone());
+                                    ui_state.load_thread_for_selected(&db).await?;
+                                    let _ = priority_tx.try_send(label_id);
                                 }
                             }
                             FocusedPanel::Messages => {
@@ -290,8 +241,7 @@ async fn main() -> anyhow::Result<()> {
                                                 old_idx, ui_state.selected_message_index, msg.thread_id
                                             ),
                                         );
-                                        ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&msg.thread_id).await?;
+                                        ui_state.load_thread_for_selected(&db).await?;
                                         logging::debug(
                                             debug_logging,
                                             &format!(
@@ -329,32 +279,24 @@ async fn main() -> anyhow::Result<()> {
                             FocusedPanel::Labels => {
                                 if ui_state.selected_label_index > 0 {
                                     ui_state.selected_label_index -= 1;
-                                    let label = &ui_state.labels[ui_state.selected_label_index];
+                                    let label_id = ui_state.labels[ui_state.selected_label_index]
+                                        .id
+                                        .clone();
                                     current_offset = 0;
                                     ui_state.messages = db
-                                        .get_messages_by_label(&label.id, limit, current_offset)
+                                        .get_messages_by_label(&label_id, limit, current_offset)
                                         .await?;
                                     ui_state.selected_message_index = 0;
                                     ui_state.detail_scroll = 0;
-                                    if let Some(msg) = ui_state.messages.get(0) {
-                                        ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&msg.thread_id).await?;
-                                    } else {
-                                        ui_state.threaded_messages.clear();
-                                    }
-                                    let _ = priority_tx.try_send(label.id.clone());
+                                    ui_state.load_thread_for_selected(&db).await?;
+                                    let _ = priority_tx.try_send(label_id);
                                 }
                             }
                             FocusedPanel::Messages => {
                                 if ui_state.selected_message_index > 0 {
                                     ui_state.selected_message_index -= 1;
                                     ui_state.detail_scroll = 0;
-                                    if let Some(msg) =
-                                        ui_state.messages.get(ui_state.selected_message_index)
-                                    {
-                                        ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&msg.thread_id).await?;
-                                    }
+                                    ui_state.load_thread_for_selected(&db).await?;
                                 }
                             }
                             FocusedPanel::Details => {
@@ -605,14 +547,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 // Refresh detail view
-                                if let Some(msg) =
-                                    ui_state.messages.get(ui_state.selected_message_index)
-                                {
-                                    ui_state.threaded_messages =
-                                        db.get_messages_by_thread(&msg.thread_id).await?;
-                                } else {
-                                    ui_state.threaded_messages.clear();
-                                }
+                                ui_state.load_thread_for_selected(&db).await?;
                             }
                         }
                     } else if matches_key(key, &config.keybindings.archive) {
@@ -710,14 +645,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 // Refresh detail view
-                                if let Some(msg) =
-                                    ui_state.messages.get(ui_state.selected_message_index)
-                                {
-                                    ui_state.threaded_messages =
-                                        db.get_messages_by_thread(&msg.thread_id).await?;
-                                } else {
-                                    ui_state.threaded_messages.clear();
-                                }
+                                ui_state.load_thread_for_selected(&db).await?;
                             }
                         }
                     } else if matches_key(key, &config.keybindings.undo) {
@@ -753,8 +681,7 @@ async fn main() -> anyhow::Result<()> {
                                         }
 
                                         // Refresh detail view
-                                        ui_state.threaded_messages =
-                                            db.get_messages_by_thread(&representative.thread_id).await?;
+                                        ui_state.load_thread_for_selected(&db).await?;
                                     }
                                     UndoableAction::Archive { messages, label_id, original_index } => {
                                         // Get the representative message (first one) for UI insertion
@@ -798,8 +725,7 @@ async fn main() -> anyhow::Result<()> {
 
                                         // Refresh detail view if message was re-added
                                         if current_label == Some(&label_id) {
-                                            ui_state.threaded_messages =
-                                                db.get_messages_by_thread(&representative.thread_id).await?;
+                                            ui_state.load_thread_for_selected(&db).await?;
                                         }
                                     }
                                 }

@@ -1,7 +1,9 @@
+use crate::db;
 use crate::logging;
 use crate::models;
 use crate::sync::SyncState;
 use crate::undo::UndoableAction;
+use anyhow::Result;
 use chrono::{DateTime, Local};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -144,6 +146,76 @@ impl<'a> Default for UIState<'a> {
             undo_stack: Vec::new(),
             status_message: None,
             debug_logging: false,
+        }
+    }
+}
+
+impl<'a> UIState<'a> {
+    pub async fn refresh_labels_and_messages(
+        &mut self,
+        db: &db::Database,
+        limit: i64,
+        current_offset: &mut i64,
+    ) -> Result<()> {
+        self.labels = db.get_labels().await?;
+        if let Some(label) = self.labels.get(self.selected_label_index) {
+            let mut new_messages = db
+                .get_messages_by_label(&label.id, limit, *current_offset)
+                .await?;
+
+            if new_messages.is_empty() && *current_offset > 0 {
+                *current_offset = 0;
+                new_messages = db.get_messages_by_label(&label.id, limit, 0).await?;
+            }
+
+            self.messages = new_messages;
+
+            if !self.messages.is_empty() {
+                self.clamp_selected_message();
+
+                if let Some(msg) = self.messages.get(self.selected_message_index) {
+                    logging::debug(
+                        self.debug_logging,
+                        &format!(
+                            "[Main] Sync refresh loading thread_id: {:?}",
+                            msg.thread_id
+                        ),
+                    );
+                    self.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                    logging::debug(
+                        self.debug_logging,
+                        &format!(
+                            "[Main] Sync refresh loaded {} messages",
+                            self.threaded_messages.len()
+                        ),
+                    );
+                }
+            } else {
+                self.selected_message_index = 0;
+                logging::debug(
+                    self.debug_logging,
+                    "[Main] Clearing threaded_messages (no messages in label)",
+                );
+                self.threaded_messages.clear();
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn load_thread_for_selected(&mut self, db: &db::Database) -> Result<()> {
+        if let Some(msg) = self.messages.get(self.selected_message_index) {
+            self.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+        } else {
+            self.threaded_messages.clear();
+        }
+
+        Ok(())
+    }
+
+    pub fn clamp_selected_message(&mut self) {
+        if !self.messages.is_empty() && self.selected_message_index >= self.messages.len() {
+            self.selected_message_index = self.messages.len().saturating_sub(1);
         }
     }
 }
