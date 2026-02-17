@@ -1,9 +1,6 @@
-use crate::models;
-<<<<<<< HEAD
 use crate::logging;
-=======
+use crate::models;
 use crate::text::convert_html_to_plain_text;
->>>>>>> 0a3b9a6 (refactor: simplify Gmail parsing helpers)
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use google_gmail1::Gmail;
