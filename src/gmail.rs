@@ -1,4 +1,5 @@
 use crate::models;
+use crate::logging;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use google_gmail1::Gmail;
@@ -157,9 +158,10 @@ impl GmailClient {
     }
 
     pub async fn trash_messages(&self, ids: &[String]) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Trashing messages: {:?}", ids));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Trashing messages: {:?}", ids),
+        );
         let req = google_gmail1::api::BatchDeleteMessagesRequest {
             ids: Some(ids.to_vec()),
         };
@@ -178,9 +180,10 @@ impl GmailClient {
     }
 
     pub async fn archive_messages(&self, ids: &[String]) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Archiving messages: {:?}", ids));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Archiving messages: {:?}", ids),
+        );
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
             remove_label_ids: Some(vec!["INBOX".to_string()]),
@@ -196,9 +199,10 @@ impl GmailClient {
     }
 
     pub async fn remove_label_from_messages(&self, ids: &[String], label_id: &str) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Removing label {} from messages: {:?}", label_id, ids));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Removing label {} from messages: {:?}", label_id, ids),
+        );
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
             remove_label_ids: Some(vec![label_id.to_string()]),
@@ -214,9 +218,10 @@ impl GmailClient {
     }
 
     pub async fn add_label_to_message(&self, id: &str, label_id: &str) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Adding label {} to message: {}", label_id, id));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Adding label {} to message: {}", label_id, id),
+        );
         let req = google_gmail1::api::ModifyMessageRequest {
             add_label_ids: Some(vec![label_id.to_string()]),
             remove_label_ids: None,
@@ -231,9 +236,10 @@ impl GmailClient {
     }
 
     pub async fn untrash_message(&self, id: &str) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Untrashing message: {}", id));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Untrashing message: {}", id),
+        );
         self.hub
             .users()
             .messages_untrash("me", id)
@@ -244,9 +250,10 @@ impl GmailClient {
     }
 
     pub async fn unarchive_message(&self, id: &str) -> Result<()> {
-        if self.debug_logging {
-            self.debug_log(&format!("Unarchiving message: {}", id));
-        }
+        logging::debug(
+            self.debug_logging,
+            &format!("Unarchiving message: {}", id),
+        );
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(vec![id.to_string()]),
             add_label_ids: Some(vec!["INBOX".to_string()]),
@@ -288,17 +295,13 @@ impl GmailClient {
 
         // Logging for troubleshooting
         if self.debug_logging {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("gtui_debug.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(file, "--- SEND ATTEMPT ---");
-                let _ = writeln!(file, "To: {}", to);
-                let _ = writeln!(file, "Subject: {}", subject);
-                let _ = writeln!(file, "Raw Message Body Length: {}", body.len());
-            }
+            logging::debug(self.debug_logging, "--- SEND ATTEMPT ---");
+            logging::debug(self.debug_logging, &format!("To: {}", to));
+            logging::debug(self.debug_logging, &format!("Subject: {}", subject));
+            logging::debug(
+                self.debug_logging,
+                &format!("Raw Message Body Length: {}", body.len()),
+            );
         }
 
         use std::io::Cursor;
@@ -312,20 +315,11 @@ impl GmailClient {
             .await;
 
         if self.debug_logging {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .append(true)
-                .open("gtui_debug.log")
-            {
-                use std::io::Write;
-                match &result {
-                    Ok(_) => {
-                        let _ = writeln!(file, "Result: SUCCESS");
-                    }
-                    Err(e) => {
-                        let _ = writeln!(file, "Result: ERROR: {:?}", e);
-                    }
-                }
-            }
+            let result_line = match &result {
+                Ok(_) => "Result: SUCCESS".to_string(),
+                Err(e) => format!("Result: ERROR: {:?}", e),
+            };
+            logging::debug(self.debug_logging, &result_line);
         }
 
         let response = result.context("Failed to send message")?;
@@ -365,16 +359,7 @@ impl GmailClient {
     }
 
     pub fn debug_log(&self, msg: &str) {
-        if self.debug_logging {
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("gtui_debug.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(file, "{}", msg);
-            }
-        }
+        logging::debug(self.debug_logging, msg);
     }
 }
 

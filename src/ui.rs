@@ -1,29 +1,16 @@
+use crate::logging;
 use crate::models;
 use crate::sync::SyncState;
 use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    Frame,
 };
 use std::sync::{Arc, Mutex};
 use tui_textarea::TextArea;
-
-/// Write to debug log file if debug mode is enabled
-fn debug_log(enabled: bool, msg: &str) {
-    if enabled {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("gtui_debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", msg);
-        }
-    }
-}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
 pub enum FocusedPanel {
@@ -349,7 +336,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
 
     // Panel 3: Thread Details
     // Debug logging for border corruption investigation
-    debug_log(
+    logging::debug(
         state.debug_logging,
         &format!(
             "[UI Render] threaded_msgs: {}, selected_idx: {}, panel: {:?}",
@@ -364,7 +351,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
             .as_ref()
             .map(|s| s.chars().take(50).collect())
             .unwrap_or_else(|| "(no body)".to_string());
-        debug_log(
+        logging::debug(
             state.debug_logging,
             &format!(
                 "[UI Render] First msg from: {:?}, body preview: {:?}",
@@ -414,7 +401,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     f.render_widget(Clear, chunks[2]);
 
     // Debug: Log details panel dimensions and content stats
-    debug_log(
+    logging::debug(
         state.debug_logging,
         &format!(
             "[UI Render] Details panel - area: x={}, y={}, w={}, h={}, content_len={}",
@@ -431,7 +418,7 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
         .filter(|(_, c)| *c == '│' || *c == '|')
         .collect();
     if !vertical_bars.is_empty() {
-        debug_log(
+        logging::debug(
             state.debug_logging,
             &format!(
                 "[UI Render] WARNING: Found {} vertical bar chars in content",

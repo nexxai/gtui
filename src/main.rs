@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod gmail;
+mod logging;
 mod models;
 mod sync;
 mod ui;
@@ -22,20 +23,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::sync::{Arc, Mutex};
-
-/// Write to debug log file if debug mode is enabled
-fn debug_log(enabled: bool, msg: &str) {
-    if enabled {
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("gtui_debug.log")
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", msg);
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -353,14 +340,26 @@ async fn main() -> anyhow::Result<()> {
 
                     // Re-load threaded messages for selected message
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                        debug_log(debug_logging, &format!("[Main] Sync refresh loading thread_id: {:?}", msg.thread_id));
+                        logging::debug(
+                            debug_logging,
+                            &format!("[Main] Sync refresh loading thread_id: {:?}", msg.thread_id),
+                        );
                         ui_state.threaded_messages =
                             db.get_messages_by_thread(&msg.thread_id).await?;
-                        debug_log(debug_logging, &format!("[Main] Sync refresh loaded {} messages", ui_state.threaded_messages.len()));
+                        logging::debug(
+                            debug_logging,
+                            &format!(
+                                "[Main] Sync refresh loaded {} messages",
+                                ui_state.threaded_messages.len()
+                            ),
+                        );
                     }
                 } else {
                     ui_state.selected_message_index = 0;
-                    debug_log(debug_logging, "[Main] Clearing threaded_messages (no messages in label)");
+                    logging::debug(
+                        debug_logging,
+                        "[Main] Clearing threaded_messages (no messages in label)",
+                    );
                     ui_state.threaded_messages.clear();
                 }
             }
@@ -441,12 +440,22 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(msg) =
                                         ui_state.messages.get(ui_state.selected_message_index)
                                     {
-                                        debug_log(debug_logging, &format!("[Main] Navigating: idx {} -> {}, thread_id: {:?}",
-                                            old_idx, ui_state.selected_message_index, msg.thread_id));
+                                        logging::debug(
+                                            debug_logging,
+                                            &format!(
+                                                "[Main] Navigating: idx {} -> {}, thread_id: {:?}",
+                                                old_idx, ui_state.selected_message_index, msg.thread_id
+                                            ),
+                                        );
                                         ui_state.threaded_messages =
                                             db.get_messages_by_thread(&msg.thread_id).await?;
-                                        debug_log(debug_logging, &format!("[Main] Loaded {} messages for thread",
-                                            ui_state.threaded_messages.len()));
+                                        logging::debug(
+                                            debug_logging,
+                                            &format!(
+                                                "[Main] Loaded {} messages for thread",
+                                                ui_state.threaded_messages.len()
+                                            ),
+                                        );
                                     }
 
                                     if ui_state.selected_message_index
