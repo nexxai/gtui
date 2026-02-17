@@ -161,16 +161,18 @@ pub fn spawn_sync_task(
                             // Detection of removals (archived/deleted from other clients)
                             // Only do this if we have the complete remote picture
                             if should_remove {
-                                if let Ok(local_info) =
-                                    sync_db.get_messages_with_dates_by_label(label_id, 200).await
+                                if let Ok(local_info) = sync_db
+                                    .get_messages_with_dates_by_label(label_id, 200)
+                                    .await
                                 {
                                     for (local_id, local_date) in local_info {
                                         // Skip messages that were recently modified locally
-                                        let is_recently_modified = if let Ok(state) = sync_state.lock() {
-                                            state.is_recently_modified(&local_id)
-                                        } else {
-                                            false
-                                        };
+                                        let is_recently_modified =
+                                            if let Ok(state) = sync_state.lock() {
+                                                state.is_recently_modified(&local_id)
+                                            } else {
+                                                false
+                                            };
 
                                         if is_recently_modified {
                                             continue;

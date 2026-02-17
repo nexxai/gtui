@@ -20,9 +20,9 @@ impl Database {
 
     pub async fn get_messages_by_thread(&self, thread_id: &str) -> Result<Vec<models::Message>> {
         let rows = sqlx::query(include_str!("../sql/get_messages_by_thread.sql"))
-        .bind(thread_id)
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(thread_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         let messages = rows
             .into_iter()
@@ -44,8 +44,6 @@ impl Database {
         Ok(messages)
     }
 
-
-
     pub async fn run_migrations(&self) -> Result<()> {
         let schema = include_str!("../schema.sql");
         sqlx::query(schema).execute(&self.pool).await?;
@@ -55,13 +53,13 @@ impl Database {
     pub async fn upsert_labels(&self, labels: &[models::Label]) -> Result<()> {
         for label in labels {
             sqlx::query(include_str!("../sql/upsert_labels.sql"))
-            .bind(&label.id)
-            .bind(&label.name)
-            .bind(&label.label_type)
-            .bind(&label.color_foreground)
-            .bind(&label.color_background)
-            .execute(&self.pool)
-            .await?;
+                .bind(&label.id)
+                .bind(&label.name)
+                .bind(&label.label_type)
+                .bind(&label.color_foreground)
+                .bind(&label.color_background)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }
@@ -73,32 +71,32 @@ impl Database {
     ) -> Result<()> {
         for msg in messages {
             sqlx::query(include_str!("../sql/upsert_messages.sql"))
-            .bind(&msg.id)
-            .bind(&msg.thread_id)
-            .bind(&msg.snippet)
-            .bind(&msg.from_address)
-            .bind(&msg.to_address)
-            .bind(&msg.subject)
-            .bind(&msg.internal_date)
-            .bind(&msg.body_plain)
-            .bind(&msg.body_html)
-            .bind(msg.is_read)
-            .execute(&self.pool)
-            .await?;
+                .bind(&msg.id)
+                .bind(&msg.thread_id)
+                .bind(&msg.snippet)
+                .bind(&msg.from_address)
+                .bind(&msg.to_address)
+                .bind(&msg.subject)
+                .bind(&msg.internal_date)
+                .bind(&msg.body_plain)
+                .bind(&msg.body_html)
+                .bind(msg.is_read)
+                .execute(&self.pool)
+                .await?;
 
             sqlx::query(include_str!("../sql/link_message_label.sql"))
-            .bind(&msg.id)
-            .bind(label_id)
-            .execute(&self.pool)
-            .await?;
+                .bind(&msg.id)
+                .bind(label_id)
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }
 
     pub async fn get_labels(&self) -> Result<Vec<models::Label>> {
         let rows = sqlx::query(include_str!("../sql/get_labels.sql"))
-        .fetch_all(&self.pool)
-        .await?;
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut labels: Vec<models::Label> = rows
             .into_iter()
@@ -133,11 +131,11 @@ impl Database {
         offset: i64,
     ) -> Result<Vec<models::Message>> {
         let rows = sqlx::query(include_str!("../sql/get_messages_by_label.sql"))
-        .bind(label_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(label_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
 
         let messages = rows
             .into_iter()
@@ -165,10 +163,10 @@ impl Database {
         limit: i64,
     ) -> Result<Vec<(String, i64)>> {
         let rows = sqlx::query(include_str!("../sql/get_messages_with_dates_by_label.sql"))
-        .bind(label_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
+            .bind(label_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?;
 
         Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
     }

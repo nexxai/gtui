@@ -108,11 +108,7 @@ impl GmailClient {
             .await
             .context(format!("Failed to get message {}", id))?;
 
-        let (from, to, subject) = msg
-            .payload
-            .as_ref()
-            .map(parse_headers)
-            .unwrap_or_default();
+        let (from, to, subject) = msg.payload.as_ref().map(parse_headers).unwrap_or_default();
         let internal_date = msg.internal_date.unwrap_or(0);
 
         let body_plain = msg
@@ -141,10 +137,7 @@ impl GmailClient {
     }
 
     pub async fn trash_messages(&self, ids: &[String]) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Trashing messages: {:?}", ids),
-        );
+        logging::debug(self.debug_logging, &format!("Trashing messages: {:?}", ids));
         let req = google_gmail1::api::BatchDeleteMessagesRequest {
             ids: Some(ids.to_vec()),
         };
@@ -181,14 +174,18 @@ impl GmailClient {
         Ok(())
     }
 
-    pub async fn remove_label_from_messages(&self, ids: &[String], label_id: &str) -> Result<()> {
+    pub async fn remove_labels_from_messages(
+        &self,
+        ids: &[String],
+        label_ids: &[String],
+    ) -> Result<()> {
         logging::debug(
             self.debug_logging,
-            &format!("Removing label {} from messages: {:?}", label_id, ids),
+            &format!("Removing labels {:?} from messages: {:?}", label_ids, ids),
         );
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
-            remove_label_ids: Some(vec![label_id.to_string()]),
+            remove_label_ids: Some(label_ids.to_vec()),
             add_label_ids: None,
         };
         self.hub
@@ -196,7 +193,7 @@ impl GmailClient {
             .messages_batch_modify(req, "me")
             .doit()
             .await
-            .context("Failed to remove label from messages")?;
+            .context("Failed to remove labels from messages")?;
         Ok(())
     }
 
@@ -219,10 +216,7 @@ impl GmailClient {
     }
 
     pub async fn untrash_message(&self, id: &str) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Untrashing message: {}", id),
-        );
+        logging::debug(self.debug_logging, &format!("Untrashing message: {}", id));
         self.hub
             .users()
             .messages_untrash("me", id)
@@ -233,10 +227,7 @@ impl GmailClient {
     }
 
     pub async fn unarchive_message(&self, id: &str) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Unarchiving message: {}", id),
-        );
+        logging::debug(self.debug_logging, &format!("Unarchiving message: {}", id));
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(vec![id.to_string()]),
             add_label_ids: Some(vec!["INBOX".to_string()]),
@@ -291,7 +282,7 @@ impl GmailClient {
         }
 
         let response = result.context("Failed to send message")?;
-        
+
         // Return the sent message ID so it can be fetched and stored
         Ok(response.1.id)
     }
@@ -338,7 +329,7 @@ fn encode_header_value(value: &str) -> String {
     if value.is_ascii() {
         return value.to_string();
     }
-    
+
     // Use Base64 encoding for the header (RFC 2047)
     // Format: =?charset?encoding?encoded_text?=
     let encoded = general_purpose::STANDARD.encode(value.as_bytes());

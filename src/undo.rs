@@ -12,7 +12,7 @@ pub enum UndoableAction {
     /// Messages were archived (label removed) - stores all messages in the thread
     Archive {
         messages: Vec<Message>,
-        label_id: String,
+        label_ids: Vec<String>,
         original_index: usize,
     },
 }
