@@ -1,5 +1,9 @@
 use crate::models;
+<<<<<<< HEAD
 use crate::logging;
+=======
+use crate::text::convert_html_to_plain_text;
+>>>>>>> 0a3b9a6 (refactor: simplify Gmail parsing helpers)
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
 use google_gmail1::Gmail;
@@ -107,28 +111,17 @@ impl GmailClient {
             .await
             .context(format!("Failed to get message {}", id))?;
 
-        let mut from = None;
-        let mut to = None;
-        let mut subject = None;
+        let (from, to, subject) = msg
+            .payload
+            .as_ref()
+            .map(parse_headers)
+            .unwrap_or_default();
         let internal_date = msg.internal_date.unwrap_or(0);
 
-        if let Some(payload) = &msg.payload {
-            if let Some(headers) = &payload.headers {
-                for header in headers {
-                    match header.name.as_deref() {
-                        Some("From") => from = header.value.clone(),
-                        Some("To") => to = header.value.clone(),
-                        Some("Subject") => subject = header.value.clone(),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let mut body_plain = None;
-        if let Some(payload) = &msg.payload {
-            body_plain = extract_text_body(payload, "text/plain");
-        }
+        let body_plain = msg
+            .payload
+            .as_ref()
+            .and_then(|payload| decode_body(payload, "text/plain"));
 
         Ok(models::Message {
             id: msg.id.unwrap_or_default(),
@@ -140,15 +133,8 @@ impl GmailClient {
             internal_date,
             body_plain,
             body_html: None,
-            is_read: !msg
-                .label_ids
-                .as_ref()
-                .unwrap_or(&vec![])
-                .contains(&"UNREAD".to_string()),
-            has_sent_reply: msg
-                .label_ids
-                .unwrap_or_default()
-                .contains(&"SENT".to_string()),
+            is_read: !has_label(msg.label_ids.as_ref(), "UNREAD"),
+            has_sent_reply: has_label(msg.label_ids.as_ref(), "SENT"),
         })
     }
 
@@ -276,22 +262,7 @@ impl GmailClient {
         subject: &str,
         body: &str,
     ) -> Result<Option<String>> {
-        let mut headers = vec![
-            format!("From: me"),
-            format!("To: {}", to),
-            format!("Subject: {}", encode_header_value(subject)),
-        ];
-
-        if !cc.is_empty() {
-            headers.push(format!("Cc: {}", cc));
-        }
-        if !bcc.is_empty() {
-            headers.push(format!("Bcc: {}", bcc));
-        }
-
-        headers.push(format!("Content-Type: text/plain; charset=\"UTF-8\""));
-
-        let raw_message = format!("{}\r\n\r\n{}", headers.join("\r\n"), body);
+        let raw_message = format!("{}\r\n\r\n{}", build_headers(to, cc, bcc, subject), body);
 
         // Logging for troubleshooting
         if self.debug_logging {
@@ -377,64 +348,47 @@ fn encode_header_value(value: &str) -> String {
     format!("=?UTF-8?B?{}?=", encoded)
 }
 
-fn convert_html_to_plain_text(html: &str) -> String {
-    let mut text = html.to_string();
+fn build_headers(to: &str, cc: &str, bcc: &str, subject: &str) -> String {
+    let mut headers = vec![
+        "From: me".to_string(),
+        format!("To: {}", to),
+        format!("Subject: {}", encode_header_value(subject)),
+    ];
 
-    // Replace line-breaking tags with newlines
-    text = text.replace("<br>", "\n");
-    text = text.replace("<br/>", "\n");
-    text = text.replace("<br />", "\n");
-    text = text.replace("</div>", "\n");
-    text = text.replace("</p>", "\n\n");
-    text = text.replace("</li>", "\n");
-
-    // Strip all other tags
-    let mut stripped = String::new();
-    let mut in_tag = false;
-    for c in text.chars() {
-        if c == '<' {
-            in_tag = true;
-        } else if c == '>' {
-            in_tag = false;
-        } else if !in_tag {
-            stripped.push(c);
-        }
+    if !cc.is_empty() {
+        headers.push(format!("Cc: {}", cc));
+    }
+    if !bcc.is_empty() {
+        headers.push(format!("Bcc: {}", bcc));
     }
 
-    // Decode common HTML entities
-    let decoded = stripped
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+    headers.push("Content-Type: text/plain; charset=\"UTF-8\"".to_string());
 
-    // Clean up whitespace: collapse multiple newlines and trim
-    let mut final_text = String::new();
-    let mut last_was_newline = false;
-
-    for line in decoded.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if !last_was_newline && !final_text.is_empty() {
-                final_text.push('\n');
-                last_was_newline = true;
-            }
-        } else {
-            if last_was_newline && !final_text.is_empty() {
-                // final_text.push('\n'); // already pushed one above
-            }
-            final_text.push_str(trimmed);
-            final_text.push('\n');
-            last_was_newline = false;
-        }
-    }
-
-    final_text.trim().to_string()
+    headers.join("\r\n")
 }
 
-fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Option<String> {
+fn parse_headers(
+    payload: &google_gmail1::api::MessagePart,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut from = None;
+    let mut to = None;
+    let mut subject = None;
+
+    if let Some(headers) = &payload.headers {
+        for header in headers {
+            match header.name.as_deref() {
+                Some("From") => from = header.value.clone(),
+                Some("To") => to = header.value.clone(),
+                Some("Subject") => subject = header.value.clone(),
+                _ => {}
+            }
+        }
+    }
+
+    (from, to, subject)
+}
+
+fn decode_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Option<String> {
     if let Some(mime) = &part.mime_type {
         if mime == mime_type {
             if let Some(body) = &part.body {
@@ -452,13 +406,13 @@ fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) ->
                         .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
                         .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
 
-                    match decoded {
-                        Ok(bytes) => return String::from_utf8(bytes).ok(),
+                    return match decoded {
+                        Ok(bytes) => String::from_utf8(bytes).ok(),
                         Err(_) => {
                             // If base64 decoding fails, it might already be raw content
-                            return String::from_utf8(data.clone()).ok();
+                            String::from_utf8(data.clone()).ok()
                         }
-                    }
+                    };
                 }
             }
         }
@@ -467,7 +421,7 @@ fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) ->
     if let Some(parts) = &part.parts {
         let mut full_body = String::new();
         for p in parts {
-            if let Some(body) = extract_text_body(p, mime_type) {
+            if let Some(body) = decode_body(p, mime_type) {
                 full_body.push_str(&body);
             }
         }
@@ -477,4 +431,10 @@ fn extract_text_body(part: &google_gmail1::api::MessagePart, mime_type: &str) ->
     }
 
     None
+}
+
+fn has_label(label_ids: Option<&Vec<String>>, label: &str) -> bool {
+    label_ids
+        .map(|ids| ids.contains(&label.to_string()))
+        .unwrap_or(false)
 }

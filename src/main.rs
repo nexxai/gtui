@@ -5,6 +5,7 @@ mod gmail;
 mod logging;
 mod models;
 mod sync;
+mod text;
 mod ui;
 mod undo;
 
