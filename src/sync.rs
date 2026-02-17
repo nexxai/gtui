@@ -1,11 +1,10 @@
+use crate::config::Config;
 use crate::db;
 use crate::gmail::GmailClient;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-const SYNC_INTERVAL_SECS: u64 = 30;
 
 #[derive(Debug, Default)]
 pub struct SyncState {
@@ -66,6 +65,7 @@ pub fn spawn_sync_task(
 ) {
     tokio::spawn(async move {
         if let Ok(sync_db) = db::Database::new(&db_url).await {
+            let sync_interval_seconds = Config::load().sync_interval_seconds;
             loop {
                 let mut has_new_data = false;
                 if let Ok(l) = sync_client.list_labels().await {
@@ -214,7 +214,7 @@ pub fn spawn_sync_task(
                     let _ = refresh_tx.send(()).await;
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(SYNC_INTERVAL_SECS)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(sync_interval_seconds)).await;
             }
         }
     });

@@ -35,6 +35,14 @@ vim-inspired interface.
 You can customize the application behavior by editing `settings.toml` in the
 project root.
 
+### Sync Interval
+
+Control how often the background sync runs (in seconds):
+
+```toml
+sync_interval_seconds = 30
+```
+
 ### Default Keybindings
 
 | Action                  | Keys                   |

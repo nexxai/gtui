@@ -6,6 +6,8 @@ pub struct Config {
     pub keybindings: Keybindings,
     #[serde(default)]
     pub signatures: Signatures,
+    #[serde(default = "default_sync_interval_seconds")]
+    pub sync_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -50,8 +52,13 @@ impl Default for Config {
                 undo: vec!["u".to_string()],
             },
             signatures: Signatures::default(),
+            sync_interval_seconds: default_sync_interval_seconds(),
         }
     }
+}
+
+fn default_sync_interval_seconds() -> u64 {
+    30
 }
 
 pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
@@ -93,7 +100,7 @@ pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
 pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
     bindings.iter().any(|b| {
         let (code, modifiers) = parse_key_string(b);
-        event.code == code && event.modifiers.contains(modifiers)
+        event.code == code && event.modifiers == modifiers
     })
 }
 
@@ -106,5 +113,29 @@ impl Config {
             }
         }
         Self::default()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_key_requires_exact_modifiers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let event = KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        let bindings = vec!["ctrl-s".to_string()];
+
+        assert!(!matches_key(event, &bindings));
+    }
+
+    #[test]
+    fn default_sync_interval_is_30() {
+        let config = Config::default();
+
+        assert_eq!(config.sync_interval_seconds, 30);
     }
 }

@@ -11,3 +11,5 @@ delete = ["d"]
 archive = ["Backspace", "a"]
 quit = ["q"]
 send_message = ["cmd-enter", "ctrl-s"]
+
+sync_interval_seconds = 30
