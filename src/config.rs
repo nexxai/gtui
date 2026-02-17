@@ -37,24 +37,28 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             keybindings: Keybindings {
-                next_panel: vec!["l".to_string(), "Right".to_string(), "Tab".to_string()],
-                prev_panel: vec!["h".to_string(), "Left".to_string(), "BackTab".to_string()],
-                move_up: vec!["k".to_string(), "Up".to_string()],
-                move_down: vec!["j".to_string(), "Down".to_string()],
-                mark_read: vec![" ".to_string()],
-                new_message: vec!["n".to_string()],
-                reply: vec!["r".to_string()],
-                forward: vec!["f".to_string()],
-                delete: vec!["Backspace".to_string(), "d".to_string()],
-                archive: vec!["a".to_string()],
-                send_message: vec!["ctrl-s".to_string()],
-                quit: vec!["q".to_string()],
-                undo: vec!["u".to_string()],
+                next_panel: keys(&["l", "Right", "Tab"]),
+                prev_panel: keys(&["h", "Left", "BackTab"]),
+                move_up: keys(&["k", "Up"]),
+                move_down: keys(&["j", "Down"]),
+                mark_read: keys(&[" "]),
+                new_message: keys(&["n"]),
+                reply: keys(&["r"]),
+                forward: keys(&["f"]),
+                delete: keys(&["Backspace", "d"]),
+                archive: keys(&["a"]),
+                send_message: keys(&["ctrl-s"]),
+                quit: keys(&["q"]),
+                undo: keys(&["u"]),
             },
             signatures: Signatures::default(),
             sync_interval_seconds: default_sync_interval_seconds(),
         }
     }
+}
+
+fn keys(entries: &[&str]) -> Vec<String> {
+    entries.iter().map(|entry| (*entry).to_string()).collect()
 }
 
 fn default_sync_interval_seconds() -> u64 {

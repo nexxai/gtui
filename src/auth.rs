@@ -34,8 +34,7 @@ pub struct RingStorage;
 #[async_trait]
 impl TokenStorage for RingStorage {
     async fn set(&self, _scopes: &[&str], token: TokenInfo) -> Result<()> {
-        let entry =
-            Entry::new(APP_NAME, TOKEN_KEY).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        let entry = self.entry()?;
 
         let mut data = self.get_all().await.unwrap_or_default();
         data.tokens.clear();
@@ -59,9 +58,12 @@ impl TokenStorage for RingStorage {
 }
 
 impl RingStorage {
+    fn entry(&self) -> Result<Entry> {
+        Entry::new(APP_NAME, TOKEN_KEY).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))
+    }
+
     async fn get_all(&self) -> Result<TokenData> {
-        let entry =
-            Entry::new(APP_NAME, TOKEN_KEY).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        let entry = self.entry()?;
 
         match entry.get_password() {
             Ok(serialized) => {
@@ -73,8 +75,7 @@ impl RingStorage {
     }
 
     pub async fn clear_token(&self) -> Result<()> {
-        let entry =
-            Entry::new(APP_NAME, TOKEN_KEY).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        let entry = self.entry()?;
         match entry.delete_password() {
             Ok(_) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
