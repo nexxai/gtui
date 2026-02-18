@@ -627,9 +627,8 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
                     .border_style(body_style),
             );
             f.render_widget(&cs.body, chunks[current_chunk]);
-            let body_chunk_idx = current_chunk;
 
-            // Set cursor position
+            // Set cursor position - skip for body since TextArea handles its own cursor
             let (cursor_row, cursor_col) = match cs.focused_field {
                 ComposeField::To => {
                     let col = cs.cursor_position.min(cs.to.len());
@@ -651,11 +650,7 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
                     )
                 }
                 ComposeField::Body => {
-                    let (row, col) = cs.body.cursor();
-                    (
-                        chunks[body_chunk_idx].y + 1 + row as u16,
-                        chunks[body_chunk_idx].x + 1 + col as u16,
-                    )
+                    return;
                 }
             };
             f.set_cursor_position((cursor_col, cursor_row));
