@@ -766,114 +766,15 @@ fn handle_composing_keys(
         }
         KeyCode::Enter => {
             if let Some(cs) = &mut ui_state.compose_state {
-                match cs.focused_field {
-                    ui::ComposeField::Body => {
-                        cs.body.input(*key);
-                    }
-                    _ => {
-                        cs.focused_field = match cs.focused_field {
-                            ui::ComposeField::To => {
-                                if cs.show_cc_bcc {
-                                    ui::ComposeField::Cc
-                                } else {
-                                    ui::ComposeField::Subject
-                                }
-                            }
-                            ui::ComposeField::Cc => ui::ComposeField::Bcc,
-                            ui::ComposeField::Bcc => ui::ComposeField::Subject,
-                            ui::ComposeField::Subject => ui::ComposeField::Body,
-                            _ => ui::ComposeField::Body,
-                        };
-                        cs.cursor_position = 0;
-                    }
-                }
-            }
-        }
-        KeyCode::Char(c) => {
-            if let Some(cs) = &mut ui_state.compose_state {
                 if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    let pos = cs.cursor_position;
-                    let field = cs.focused_field_text();
-                    let pos = pos.min(field.len());
-                    field.insert(pos, c);
-                    cs.cursor_position = pos + 1;
+                    cs.focused_textarea().input(*key);
                 }
-            }
-        }
-        KeyCode::Backspace => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    let pos = cs.cursor_position;
-                    if pos > 0 {
-                        let field = cs.focused_field_text();
-                        let pos = pos - 1;
-                        field.remove(pos);
-                        cs.cursor_position = pos;
-                    }
-                }
-            }
-        }
-        KeyCode::Left => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else if cs.cursor_position > 0 {
-                    cs.cursor_position -= 1;
-                }
-            }
-        }
-        KeyCode::Right => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    let field_len = cs.focused_field_text().len();
-                    if cs.cursor_position < field_len {
-                        cs.cursor_position += 1;
-                    }
-                }
-            }
-        }
-        KeyCode::Home => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    cs.cursor_position = 0;
-                }
-            }
-        }
-        KeyCode::End => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    cs.cursor_position = cs.focused_field_text().len();
-                }
-            }
-        }
-        KeyCode::Delete => {
-            if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                } else {
-                    let pos = cs.cursor_position;
-                    let field = cs.focused_field_text();
-                    if pos < field.len() {
-                        field.remove(pos);
-                    }
-                }
+                // Ignore Enter in single-line fields (to/cc/bcc/subject)
             }
         }
         _ => {
             if let Some(cs) = &mut ui_state.compose_state {
-                if cs.focused_field == ui::ComposeField::Body {
-                    cs.body.input(*key);
-                }
+                cs.focused_textarea().input(*key);
             }
         }
     }

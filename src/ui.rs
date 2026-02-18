@@ -39,63 +39,75 @@ pub enum ComposeField {
 }
 
 pub struct ComposeState<'a> {
-    pub to: String,
-    pub cc: String,
-    pub bcc: String,
-    pub subject: String,
+    pub to: TextArea<'a>,
+    pub cc: TextArea<'a>,
+    pub bcc: TextArea<'a>,
+    pub subject: TextArea<'a>,
     pub body: TextArea<'a>,
     pub focused_field: ComposeField,
     pub show_cc_bcc: bool,
-    pub cursor_position: usize,
 }
 
 impl<'a> ComposeState<'a> {
     pub fn new(to: &str, cc: &str, bcc: &str, subject: &str, body: &str) -> Self {
+        let to_text = to.replace('\n', " ").replace('\r', " ");
+        let cc_text = cc.replace('\n', " ").replace('\r', " ");
+        let bcc_text = bcc.replace('\n', " ").replace('\r', " ");
+        let subject_text = subject.replace('\n', " ").replace('\r', " ");
+
+        let mut to_textarea = TextArea::from(to_text.lines());
+        let mut cc_textarea = TextArea::from(cc_text.lines());
+        let mut bcc_textarea = TextArea::from(bcc_text.lines());
+        let mut subject_textarea = TextArea::from(subject_text.lines());
         let mut body_textarea = TextArea::from(body.lines());
+
         let no_highlight = Style::default();
+        to_textarea.set_cursor_line_style(no_highlight);
+        cc_textarea.set_cursor_line_style(no_highlight);
+        bcc_textarea.set_cursor_line_style(no_highlight);
+        subject_textarea.set_cursor_line_style(no_highlight);
         body_textarea.set_cursor_line_style(no_highlight);
         body_textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
-            to: to.to_string(),
-            cc: cc.to_string(),
-            bcc: bcc.to_string(),
-            subject: subject.to_string(),
+            to: to_textarea,
+            cc: cc_textarea,
+            bcc: bcc_textarea,
+            subject: subject_textarea,
             body: body_textarea,
             focused_field: ComposeField::To,
             show_cc_bcc: false,
-            cursor_position: 0,
         }
     }
 
     /// Get the current text content of a field
     pub fn get_to(&self) -> String {
-        self.to.clone()
+        self.to.lines().join("\n")
     }
 
     pub fn get_cc(&self) -> String {
-        self.cc.clone()
+        self.cc.lines().join("\n")
     }
 
     pub fn get_bcc(&self) -> String {
-        self.bcc.clone()
+        self.bcc.lines().join("\n")
     }
 
     pub fn get_subject(&self) -> String {
-        self.subject.clone()
+        self.subject.lines().join("\n")
     }
 
     pub fn get_body(&self) -> String {
         self.body.lines().join("\n")
     }
 
-    pub fn focused_field_text(&mut self) -> &mut String {
+    pub fn focused_textarea(&mut self) -> &mut TextArea<'a> {
         match self.focused_field {
             ComposeField::To => &mut self.to,
             ComposeField::Cc => &mut self.cc,
             ComposeField::Bcc => &mut self.bcc,
             ComposeField::Subject => &mut self.subject,
-            ComposeField::Body => panic!("Use body TextArea directly"),
+            ComposeField::Body => &mut self.body,
         }
     }
 }
@@ -536,15 +548,13 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let to_block = Block::default()
-                .borders(Borders::ALL)
-                .title(" To ")
-                .border_style(to_style);
-            let to_text = if cs.to.is_empty() { " " } else { &cs.to };
-            let to_para = Paragraph::new(to_text)
-                .block(to_block)
-                .wrap(ratatui::widgets::Wrap { trim: false });
-            f.render_widget(to_para, chunks[current_chunk]);
+            cs.to.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" To ")
+                    .border_style(to_style),
+            );
+            f.render_widget(&cs.to, chunks[current_chunk]);
             current_chunk += 1;
 
             // Cc/Bcc fields (optional)
@@ -556,15 +566,13 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                let cc_block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Cc ")
-                    .border_style(cc_style);
-                let cc_text = if cs.cc.is_empty() { " " } else { &cs.cc };
-                let cc_para = Paragraph::new(cc_text)
-                    .block(cc_block)
-                    .wrap(ratatui::widgets::Wrap { trim: false });
-                f.render_widget(cc_para, chunks[current_chunk]);
+                cs.cc.set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Cc ")
+                        .border_style(cc_style),
+                );
+                f.render_widget(&cs.cc, chunks[current_chunk]);
                 current_chunk += 1;
 
                 let bcc_style = if cs.focused_field == ComposeField::Bcc {
@@ -574,15 +582,13 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
                 } else {
                     Style::default().fg(Color::Gray)
                 };
-                let bcc_block = Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Bcc ")
-                    .border_style(bcc_style);
-                let bcc_text = if cs.bcc.is_empty() { " " } else { &cs.bcc };
-                let bcc_para = Paragraph::new(bcc_text)
-                    .block(bcc_block)
-                    .wrap(ratatui::widgets::Wrap { trim: false });
-                f.render_widget(bcc_para, chunks[current_chunk]);
+                cs.bcc.set_block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Bcc ")
+                        .border_style(bcc_style),
+                );
+                f.render_widget(&cs.bcc, chunks[current_chunk]);
                 current_chunk += 1;
             }
 
@@ -594,16 +600,13 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let sub_block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Subject ")
-                .border_style(sub_style);
-            let sub_text = if cs.subject.is_empty() { " " } else { &cs.subject };
-            let sub_para = Paragraph::new(sub_text)
-                .block(sub_block)
-                .wrap(ratatui::widgets::Wrap { trim: false });
-            f.render_widget(sub_para, chunks[current_chunk]);
-            let sub_chunk_idx = current_chunk;
+            cs.subject.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Subject ")
+                    .border_style(sub_style),
+            );
+            f.render_widget(&cs.subject, chunks[current_chunk]);
             current_chunk += 1;
 
             // Body field
@@ -627,33 +630,6 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
                     .border_style(body_style),
             );
             f.render_widget(&cs.body, chunks[current_chunk]);
-
-            // Set cursor position - skip for body since TextArea handles its own cursor
-            let (cursor_row, cursor_col) = match cs.focused_field {
-                ComposeField::To => {
-                    let col = cs.cursor_position.min(cs.to.len());
-                    (chunks[0].y + 1, chunks[0].x + 1 + col as u16)
-                }
-                ComposeField::Cc => {
-                    let col = cs.cursor_position.min(cs.cc.len());
-                    (chunks[1].y + 1, chunks[1].x + 1 + col as u16)
-                }
-                ComposeField::Bcc => {
-                    let col = cs.cursor_position.min(cs.bcc.len());
-                    (chunks[2].y + 1, chunks[2].x + 1 + col as u16)
-                }
-                ComposeField::Subject => {
-                    let col = cs.cursor_position.min(cs.subject.len());
-                    (
-                        chunks[sub_chunk_idx].y + 1,
-                        chunks[sub_chunk_idx].x + 1 + col as u16,
-                    )
-                }
-                ComposeField::Body => {
-                    return;
-                }
-            };
-            f.set_cursor_position((cursor_col, cursor_row));
         }
     }
 }
