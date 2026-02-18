@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn matches_key_requires_exact_modifiers() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let event = KeyEvent::new(
             KeyCode::Char('s'),

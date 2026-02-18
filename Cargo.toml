@@ -1,14 +1,14 @@
 [package]
 name = "gtui"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 default-run = "gtui"
 
 [dependencies]
 # TUI and Terminal Handling
-ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
-tui-textarea = "0.7"
+ratatui = "*"
+tui-textarea = { package = "tui-textarea-2", version = "*" }
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }

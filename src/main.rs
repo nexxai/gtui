@@ -14,7 +14,7 @@ use crate::gmail::GmailClient;
 use crate::ui::FocusedPanel;
 use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
-use crossterm::{
+use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -218,7 +218,7 @@ fn handle_message_actions(
             let final_body = format!("\n\n{}{}", signature_part, quoted_body);
 
             ui_state.mode = ui::UIMode::Composing;
-            let _ = execute!(io::stdout(), crossterm::cursor::Show);
+            let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
             let mut compose = ui::ComposeState::new(
                 &m.from_address.clone().unwrap_or_default(),
                 "",
@@ -288,7 +288,7 @@ fn handle_message_actions(
             }
 
             ui_state.mode = ui::UIMode::Composing;
-            let _ = execute!(io::stdout(), crossterm::cursor::Show);
+            let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
             let compose = ui::ComposeState::new(
                 "", // Empty To field
                 "",
@@ -304,7 +304,7 @@ fn handle_message_actions(
     if matches_key(*key, &config.keybindings.new_message) {
         // New message
         ui_state.mode = ui::UIMode::Composing;
-        let _ = execute!(io::stdout(), crossterm::cursor::Show);
+        let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 
         let mut body = String::new();
         let sig_to_use = ui_state
@@ -683,7 +683,7 @@ fn handle_composing_keys(
     match key.code {
         KeyCode::Esc => {
             ui_state.mode = ui::UIMode::Browsing;
-            let _ = execute!(io::stdout(), crossterm::cursor::Hide);
+            let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Hide);
             ui_state.compose_state = None;
         }
         _ if matches_key(*key, &config.keybindings.send_message) => {
@@ -718,13 +718,13 @@ fn handle_composing_keys(
                 }
             }
             ui_state.mode = ui::UIMode::Browsing;
-            let _ = execute!(io::stdout(), crossterm::cursor::Hide);
+            let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Hide);
             ui_state.compose_state = None;
         }
         KeyCode::Char('b')
             if key
                 .modifiers
-                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
         {
             if let Some(cs) = &mut ui_state.compose_state {
                 cs.show_cc_bcc = !cs.show_cc_bcc;
@@ -768,11 +768,9 @@ fn handle_composing_keys(
             if let Some(cs) = &mut ui_state.compose_state {
                 match cs.focused_field {
                     ui::ComposeField::Body => {
-                        // Let TextArea handle Enter in body
-                        cs.focused_textarea().input(*key);
+                        cs.body.input(*key);
                     }
                     _ => {
-                        // Move to next field on Enter in other fields
                         cs.focused_field = match cs.focused_field {
                             ui::ComposeField::To => {
                                 if cs.show_cc_bcc {
@@ -786,14 +784,96 @@ fn handle_composing_keys(
                             ui::ComposeField::Subject => ui::ComposeField::Body,
                             _ => ui::ComposeField::Body,
                         };
+                        cs.cursor_position = 0;
+                    }
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    let pos = cs.cursor_position;
+                    let field = cs.focused_field_text();
+                    let pos = pos.min(field.len());
+                    field.insert(pos, c);
+                    cs.cursor_position = pos + 1;
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    let pos = cs.cursor_position;
+                    if pos > 0 {
+                        let field = cs.focused_field_text();
+                        let pos = pos - 1;
+                        field.remove(pos);
+                        cs.cursor_position = pos;
+                    }
+                }
+            }
+        }
+        KeyCode::Left => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else if cs.cursor_position > 0 {
+                    cs.cursor_position -= 1;
+                }
+            }
+        }
+        KeyCode::Right => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    let field_len = cs.focused_field_text().len();
+                    if cs.cursor_position < field_len {
+                        cs.cursor_position += 1;
+                    }
+                }
+            }
+        }
+        KeyCode::Home => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    cs.cursor_position = 0;
+                }
+            }
+        }
+        KeyCode::End => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    cs.cursor_position = cs.focused_field_text().len();
+                }
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(cs) = &mut ui_state.compose_state {
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                } else {
+                    let pos = cs.cursor_position;
+                    let field = cs.focused_field_text();
+                    if pos < field.len() {
+                        field.remove(pos);
                     }
                 }
             }
         }
         _ => {
-            // Let TextArea handle all other input (chars, backspace, arrows, Ctrl+arrows, etc.)
             if let Some(cs) = &mut ui_state.compose_state {
-                cs.focused_textarea().input(*key);
+                if cs.focused_field == ui::ComposeField::Body {
+                    cs.body.input(*key);
+                }
             }
         }
     }
@@ -821,8 +901,8 @@ async fn main() -> anyhow::Result<()> {
     let mut stdout = io::stdout();
     execute!(
         stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        ratatui::crossterm::terminal::EnterAlternateScreen,
+        ratatui::crossterm::event::EnableMouseCapture
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -1036,8 +1116,8 @@ async fn main() -> anyhow::Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        ratatui::crossterm::terminal::LeaveAlternateScreen,
+        ratatui::crossterm::event::DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
