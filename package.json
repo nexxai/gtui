@@ -1,0 +1,19 @@
+{
+  "name": "gtui",
+  "version": "0.1.0",
+  "description": "GTUI - A terminal user interface for Gmail",
+  "repository": "github:nexxai/gtui",
+  "devDependencies": {
+    "semantic-release": "^24.0.0"
+  },
+  "release": {
+    "plugins": [
+      "@semantic-release/commit-analyzer",
+      "@semantic-release/release-notes-generator",
+      "@semantic-release/github"
+    ]
+  },
+  "scripts": {
+    "release": "semantic-release"
+  }
+}
