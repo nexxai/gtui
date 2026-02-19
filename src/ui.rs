@@ -7,10 +7,10 @@ use crate::undo::UndoableAction;
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 use std::sync::{Arc, Mutex};
 use tui_textarea::{TextArea, WrapMode};

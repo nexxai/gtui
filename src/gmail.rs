@@ -138,16 +138,41 @@ impl GmailClient {
 
     pub async fn trash_messages(&self, ids: &[String]) -> Result<()> {
         logging::debug(self.debug_logging, &format!("Trashing messages: {:?}", ids));
-        let req = google_gmail1::api::BatchDeleteMessagesRequest {
+        logging::debug(
+            self.debug_logging,
+            &format!("Number of messages to trash: {}", ids.len()),
+        );
+
+        let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
+            add_label_ids: Some(vec!["TRASH".to_string()]),
+            remove_label_ids: None,
         };
-        self.hub
+
+        logging::debug(
+            self.debug_logging,
+            "About to call Gmail API messages_batch_modify to add TRASH label",
+        );
+
+        match self
+            .hub
             .users()
-            .messages_batch_delete(req, "me")
+            .messages_batch_modify(req, "me")
             .doit()
             .await
-            .context("Failed to trash messages")?;
-        Ok(())
+        {
+            Ok(_response) => {
+                logging::debug(self.debug_logging, "Gmail API call succeeded");
+                Ok(())
+            }
+            Err(e) => {
+                logging::debug(
+                    self.debug_logging,
+                    &format!("Gmail API call failed with error: {:?}", e),
+                );
+                Err(e).context("Failed to trash messages")
+            }
+        }
     }
 
     #[allow(dead_code)]

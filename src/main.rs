@@ -382,6 +382,13 @@ async fn handle_delete_action(
         // Call Gmail API and await result to ensure it succeeds
         let mut api_succeeded = true;
         if let Some(gmail) = &gmail_client {
+            logging::debug(
+                ui_state.debug_logging,
+                &format!(
+                    "About to call trash_messages for {} messages",
+                    message_ids.len()
+                ),
+            );
             match gmail.trash_messages(&message_ids).await {
                 Ok(_) => {
                     ui_state.toast = Some(Toast::new(
@@ -390,6 +397,10 @@ async fn handle_delete_action(
                     ));
                 }
                 Err(e) => {
+                    logging::debug(
+                        ui_state.debug_logging,
+                        &format!("trash_messages returned error: {}", e),
+                    );
                     ui_state.toast = Some(Toast::new(
                         format!("Delete failed: {}", e),
                         ToastPosition::BottomRight,
