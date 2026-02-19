@@ -607,7 +607,7 @@ async fn handle_undo_action(
         FocusedPanel::Messages | FocusedPanel::Details
     ) && let Some(action) = ui_state.undo_stack.pop()
     {
-        let description = action.description();
+        let description = action.to_string();
         match &action {
             UndoableAction::Delete {
                 messages,
