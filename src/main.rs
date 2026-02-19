@@ -27,7 +27,6 @@ use ratatui::crossterm::{
 use std::io;
 use std::sync::{Arc, Mutex};
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_navigation_keys(
     key: &KeyEvent,
     config: &Config,
@@ -36,7 +35,6 @@ async fn handle_navigation_keys(
     current_offset: &mut i64,
     limit: i64,
     priority_tx: &tokio::sync::mpsc::Sender<String>,
-    debug_logging: bool,
 ) -> anyhow::Result<bool> {
     // Panel switching
     if matches_key(*key, &config.keybindings.prev_panel) {
@@ -79,20 +77,16 @@ async fn handle_navigation_keys(
                     ui_state.selected_message_index += 1;
                     ui_state.detail_scroll = 0;
                     if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                        logging::debug(
-                            debug_logging,
-                            &format!(
-                                "[Main] Navigating: idx {} -> {}, thread_id: {:?}",
-                                old_idx, ui_state.selected_message_index, msg.thread_id
-                            ),
+                        tracing::debug!(
+                            old_idx,
+                            new_idx = ui_state.selected_message_index,
+                            thread_id = ?msg.thread_id,
+                            "navigating message list"
                         );
                         ui_state.load_thread_for_selected(db).await?;
-                        logging::debug(
-                            debug_logging,
-                            &format!(
-                                "[Main] Loaded {} messages for thread",
-                                ui_state.threaded_messages.len()
-                            ),
+                        tracing::debug!(
+                            count = ui_state.threaded_messages.len(),
+                            "loaded thread messages"
                         );
                     }
 
@@ -383,13 +377,7 @@ async fn handle_delete_action(
         // Call Gmail API and await result to ensure it succeeds
         let mut api_succeeded = true;
         if let Some(gmail) = &gmail_client {
-            logging::debug(
-                ui_state.debug_logging,
-                &format!(
-                    "About to call trash_messages for {} messages",
-                    message_ids.len()
-                ),
-            );
+            tracing::debug!(count = message_ids.len(), "about to trash messages");
             match gmail.trash_messages(&message_ids).await {
                 Ok(_) => {
                     ui_state.toast = Some(Toast::new(
@@ -398,10 +386,7 @@ async fn handle_delete_action(
                     ));
                 }
                 Err(e) => {
-                    logging::debug(
-                        ui_state.debug_logging,
-                        &format!("trash_messages returned error: {}", e),
-                    );
+                    tracing::debug!(?e, "trash_messages failed");
                     ui_state.toast = Some(Toast::new(
                         format!("Delete failed: {}", e),
                         ToastPosition::BottomRight,
@@ -826,6 +811,8 @@ fn handle_composing_keys(
 async fn main() -> anyhow::Result<()> {
     let config = Config::load();
     let debug_logging = std::env::args().any(|arg| arg == "--debug");
+    logging::init(debug_logging);
+
     let db_url = "sqlite:gtui.db?mode=rwc".to_string();
     let db = db::Database::new(&db_url).await?;
     db.run_migrations().await?;
@@ -848,10 +835,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut ui_state = ui::UIState {
-        debug_logging,
-        ..Default::default()
-    };
+    let mut ui_state = ui::UIState::default();
 
     // Shared sync state for UI awareness
     let sync_state = Arc::new(Mutex::new(sync::SyncState::default()));
@@ -911,7 +895,7 @@ async fn main() -> anyhow::Result<()> {
                 auth_builder.clone(),
             );
 
-            let client = GmailClient::new(hub, debug_logging);
+            let client = GmailClient::new(hub);
             gmail_client = Some(client.clone());
 
             // Fetch remote signature
@@ -1001,7 +985,6 @@ async fn main() -> anyhow::Result<()> {
                         &mut current_offset,
                         limit,
                         &priority_tx,
-                        debug_logging,
                     )
                     .await?;
                     if handled {

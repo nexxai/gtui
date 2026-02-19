@@ -1,5 +1,4 @@
 use crate::db;
-use crate::logging;
 use crate::models;
 use crate::sync::SyncState;
 use crate::toast::Toast;
@@ -128,7 +127,6 @@ pub struct UIState<'a> {
     pub remote_signature: Option<String>,
     pub sync_state: Arc<Mutex<SyncState>>,
     pub undo_stack: Vec<UndoableAction>,
-    pub debug_logging: bool,
     pub toast: Option<Toast>,
 }
 
@@ -149,7 +147,6 @@ impl<'a> Default for UIState<'a> {
             remote_signature: None,
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             undo_stack: Vec::new(),
-            debug_logging: false,
             toast: None,
         }
     }
@@ -179,25 +176,19 @@ impl<'a> UIState<'a> {
                 self.clamp_selected_message();
 
                 if let Some(msg) = self.messages.get(self.selected_message_index) {
-                    logging::debug(
-                        self.debug_logging,
-                        &format!("[Main] Sync refresh loading thread_id: {:?}", msg.thread_id),
+                    tracing::debug!(
+                        thread_id = ?msg.thread_id,
+                        "sync refresh loading thread"
                     );
                     self.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
-                    logging::debug(
-                        self.debug_logging,
-                        &format!(
-                            "[Main] Sync refresh loaded {} messages",
-                            self.threaded_messages.len()
-                        ),
+                    tracing::debug!(
+                        count = self.threaded_messages.len(),
+                        "sync refresh loaded thread messages"
                     );
                 }
             } else {
                 self.selected_message_index = 0;
-                logging::debug(
-                    self.debug_logging,
-                    "[Main] Clearing threaded_messages (no messages in label)",
-                );
+                tracing::debug!("clearing threaded_messages (no messages in label)");
                 self.threaded_messages.clear();
             }
         }
@@ -422,15 +413,11 @@ fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
 }
 
 fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
-    // Debug logging for border corruption investigation
-    logging::debug(
-        state.debug_logging,
-        &format!(
-            "[UI Render] threaded_msgs: {}, selected_idx: {}, panel: {:?}",
-            state.threaded_messages.len(),
-            state.selected_message_index,
-            state.focused_panel
-        ),
+    tracing::debug!(
+        threaded_msgs = state.threaded_messages.len(),
+        selected_idx = state.selected_message_index,
+        panel = ?state.focused_panel,
+        "rendering details panel"
     );
     if let Some(first_msg) = state.threaded_messages.first() {
         let preview: String = first_msg
@@ -438,12 +425,10 @@ fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
             .as_ref()
             .map(|s| s.chars().take(50).collect())
             .unwrap_or_else(|| "(no body)".to_string());
-        logging::debug(
-            state.debug_logging,
-            &format!(
-                "[UI Render] First msg from: {:?}, body preview: {:?}",
-                first_msg.from_address, preview
-            ),
+        tracing::debug!(
+            from = ?first_msg.from_address,
+            body_preview = ?preview,
+            "first thread message"
         );
     }
 
@@ -484,30 +469,23 @@ fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
     // Clear the details area first to prevent rendering artifacts when scrolling fast
     f.render_widget(Clear, area);
 
-    // Debug: Log details panel dimensions and content stats
-    logging::debug(
-        state.debug_logging,
-        &format!(
-            "[UI Render] Details panel - area: x={}, y={}, w={}, h={}, content_len={}",
-            area.x,
-            area.y,
-            area.width,
-            area.height,
-            detail_content.len()
-        ),
+    tracing::debug!(
+        x = area.x,
+        y = area.y,
+        w = area.width,
+        h = area.height,
+        content_len = detail_content.len(),
+        "details panel dimensions"
     );
-    // Log any vertical bar characters in content that might be problematic
-    let vertical_bars: Vec<(usize, char)> = detail_content
-        .char_indices()
-        .filter(|(_, c)| *c == '│' || *c == '|')
-        .collect();
-    if !vertical_bars.is_empty() {
-        logging::debug(
-            state.debug_logging,
-            &format!(
-                "[UI Render] WARNING: Found {} vertical bar chars in content",
-                vertical_bars.len()
-            ),
+
+    let vertical_bar_count = detail_content
+        .chars()
+        .filter(|c| *c == '│' || *c == '|')
+        .count();
+    if vertical_bar_count > 0 {
+        tracing::debug!(
+            count = vertical_bar_count,
+            "found vertical bar chars in content"
         );
     }
 

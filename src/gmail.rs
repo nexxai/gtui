@@ -1,4 +1,3 @@
-use crate::logging;
 use crate::models;
 use crate::text::convert_html_to_plain_text;
 use anyhow::{Context, Result};
@@ -7,16 +6,16 @@ use google_gmail1::Gmail;
 use hyper::client::HttpConnector;
 use hyper_rustls::HttpsConnector;
 use inflections::case::to_title_case;
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct GmailClient {
     hub: Gmail<HttpsConnector<HttpConnector>>,
-    debug_logging: bool,
 }
 
 impl GmailClient {
-    pub fn new(hub: Gmail<HttpsConnector<HttpConnector>>, debug_logging: bool) -> Self {
-        Self { hub, debug_logging }
+    pub fn new(hub: Gmail<HttpsConnector<HttpConnector>>) -> Self {
+        Self { hub }
     }
 
     pub async fn get_signature(&self) -> Result<Option<String>> {
@@ -28,16 +27,13 @@ impl GmailClient {
             .await
             .context("Failed to list send-as aliases")?;
 
-        if let Some(alias_list) = aliases.send_as {
-            // Find the primary alias
-            if let Some(primary) = alias_list
-                .into_iter()
-                .find(|a| a.is_primary.unwrap_or(false))
-            {
-                return Ok(primary.signature.map(|s| convert_html_to_plain_text(&s)));
-            }
-        }
-        Ok(None)
+        let primary = aliases
+            .send_as
+            .into_iter()
+            .flatten()
+            .find(|a| a.is_primary.unwrap_or(false));
+
+        Ok(primary.and_then(|a| a.signature.map(|s| convert_html_to_plain_text(&s))))
     }
 
     pub async fn list_labels(&self) -> Result<Vec<models::Label>> {
@@ -137,11 +133,7 @@ impl GmailClient {
     }
 
     pub async fn trash_messages(&self, ids: &[String]) -> Result<()> {
-        logging::debug(self.debug_logging, &format!("Trashing messages: {:?}", ids));
-        logging::debug(
-            self.debug_logging,
-            &format!("Number of messages to trash: {}", ids.len()),
-        );
+        debug!(?ids, count = ids.len(), "trashing messages");
 
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
@@ -149,30 +141,9 @@ impl GmailClient {
             remove_label_ids: None,
         };
 
-        logging::debug(
-            self.debug_logging,
-            "About to call Gmail API messages_batch_modify to add TRASH label",
-        );
-
-        match self
-            .hub
-            .users()
-            .messages_batch_modify(req, "me")
-            .doit()
+        self.batch_modify(req)
             .await
-        {
-            Ok(_response) => {
-                logging::debug(self.debug_logging, "Gmail API call succeeded");
-                Ok(())
-            }
-            Err(e) => {
-                logging::debug(
-                    self.debug_logging,
-                    &format!("Gmail API call failed with error: {:?}", e),
-                );
-                Err(e).context("Failed to trash messages")
-            }
-        }
+            .context("Failed to trash messages")
     }
 
     #[allow(dead_code)]
@@ -181,22 +152,17 @@ impl GmailClient {
     }
 
     pub async fn archive_messages(&self, ids: &[String]) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Archiving messages: {:?}", ids),
-        );
+        debug!(?ids, "archiving messages");
+
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
             remove_label_ids: Some(vec!["INBOX".to_string()]),
             add_label_ids: None,
         };
-        self.hub
-            .users()
-            .messages_batch_modify(req, "me")
-            .doit()
+
+        self.batch_modify(req)
             .await
-            .context("Failed to archive messages")?;
-        Ok(())
+            .context("Failed to archive messages")
     }
 
     pub async fn remove_labels_from_messages(
@@ -204,67 +170,62 @@ impl GmailClient {
         ids: &[String],
         label_ids: &[String],
     ) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Removing labels {:?} from messages: {:?}", label_ids, ids),
-        );
+        debug!(?label_ids, ?ids, "removing labels from messages");
+
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(ids.to_vec()),
             remove_label_ids: Some(label_ids.to_vec()),
             add_label_ids: None,
         };
-        self.hub
-            .users()
-            .messages_batch_modify(req, "me")
-            .doit()
+
+        self.batch_modify(req)
             .await
-            .context("Failed to remove labels from messages")?;
-        Ok(())
+            .context("Failed to remove labels from messages")
     }
 
     pub async fn add_label_to_message(&self, id: &str, label_id: &str) -> Result<()> {
-        logging::debug(
-            self.debug_logging,
-            &format!("Adding label {} to message: {}", label_id, id),
-        );
+        debug!(id, label_id, "adding label to message");
+
         let req = google_gmail1::api::ModifyMessageRequest {
             add_label_ids: Some(vec![label_id.to_string()]),
             remove_label_ids: None,
         };
+
         self.hub
             .users()
             .messages_modify(req, "me", id)
             .doit()
             .await
             .context("Failed to add label to message")?;
+
         Ok(())
     }
 
     pub async fn untrash_message(&self, id: &str) -> Result<()> {
-        logging::debug(self.debug_logging, &format!("Untrashing message: {}", id));
+        debug!(id, "untrashing message");
+
         self.hub
             .users()
             .messages_untrash("me", id)
             .doit()
             .await
             .context("Failed to untrash message")?;
+
         Ok(())
     }
 
     pub async fn unarchive_message(&self, id: &str) -> Result<()> {
-        logging::debug(self.debug_logging, &format!("Unarchiving message: {}", id));
+        debug!(id, "unarchiving message");
+
         let req = google_gmail1::api::BatchModifyMessagesRequest {
             ids: Some(vec![id.to_string()]),
             add_label_ids: Some(vec!["INBOX".to_string()]),
             remove_label_ids: None,
         };
-        self.hub
-            .users()
-            .messages_batch_modify(req, "me")
-            .doit()
+
+        self.batch_modify(req)
             .await
-            .context("Failed to unarchive message")?;
-        Ok(())
+            .context("Failed to unarchive message")
     }
 
     pub async fn send_message(
@@ -275,18 +236,9 @@ impl GmailClient {
         subject: &str,
         body: &str,
     ) -> Result<Option<String>> {
-        let raw_message = format!("{}\r\n\r\n{}", build_headers(to, cc, bcc, subject), body);
+        debug!(to, subject, body_len = body.len(), "sending message");
 
-        // Logging for troubleshooting
-        if self.debug_logging {
-            logging::debug(self.debug_logging, "--- SEND ATTEMPT ---");
-            logging::debug(self.debug_logging, &format!("To: {}", to));
-            logging::debug(self.debug_logging, &format!("Subject: {}", subject));
-            logging::debug(
-                self.debug_logging,
-                &format!("Raw Message Body Length: {}", body.len()),
-            );
-        }
+        let raw_message = format!("{}\r\n\r\n{}", build_headers(to, cc, bcc, subject), body);
 
         use std::io::Cursor;
         let cursor = Cursor::new(raw_message.into_bytes());
@@ -298,17 +250,12 @@ impl GmailClient {
             .upload(cursor, "message/rfc822".parse().unwrap())
             .await;
 
-        if self.debug_logging {
-            let result_line = match &result {
-                Ok(_) => "Result: SUCCESS".to_string(),
-                Err(e) => format!("Result: ERROR: {:?}", e),
-            };
-            logging::debug(self.debug_logging, &result_line);
+        match &result {
+            Ok(_) => debug!("send succeeded"),
+            Err(e) => debug!(?e, "send failed"),
         }
 
         let response = result.context("Failed to send message")?;
-
-        // Return the sent message ID so it can be fetched and stored
         Ok(response.1.id)
     }
 
@@ -318,13 +265,10 @@ impl GmailClient {
             remove_label_ids: Some(vec!["UNREAD".to_string()]),
             add_label_ids: None,
         };
-        self.hub
-            .users()
-            .messages_batch_modify(req, "me")
-            .doit()
+
+        self.batch_modify(req)
             .await
-            .context("Failed to mark message as read")?;
-        Ok(())
+            .context("Failed to mark message as read")
     }
 
     pub async fn mark_as_unread(&self, id: &str) -> Result<()> {
@@ -333,30 +277,34 @@ impl GmailClient {
             remove_label_ids: None,
             add_label_ids: Some(vec!["UNREAD".to_string()]),
         };
+
+        self.batch_modify(req)
+            .await
+            .context("Failed to mark message as unread")
+    }
+
+    // -- private helpers --
+
+    async fn batch_modify(
+        &self,
+        req: google_gmail1::api::BatchModifyMessagesRequest,
+    ) -> Result<()> {
         self.hub
             .users()
             .messages_batch_modify(req, "me")
             .doit()
-            .await
-            .context("Failed to mark message as unread")?;
-        Ok(())
-    }
+            .await?;
 
-    pub fn debug_log(&self, msg: &str) {
-        logging::debug(self.debug_logging, msg);
+        Ok(())
     }
 }
 
 /// Encode a header value using RFC 2047 MIME encoded-word syntax if it contains non-ASCII characters.
-/// This ensures proper handling of special characters like curly quotes in email subjects.
 fn encode_header_value(value: &str) -> String {
-    // Check if the string contains any non-ASCII characters
     if value.is_ascii() {
         return value.to_string();
     }
 
-    // Use Base64 encoding for the header (RFC 2047)
-    // Format: =?charset?encoding?encoded_text?=
     let encoded = general_purpose::STANDARD.encode(value.as_bytes());
     format!("=?UTF-8?B?{}?=", encoded)
 }
@@ -376,7 +324,6 @@ fn build_headers(to: &str, cc: &str, bcc: &str, subject: &str) -> String {
     }
 
     headers.push("Content-Type: text/plain; charset=\"UTF-8\"".to_string());
-
     headers.join("\r\n")
 }
 
@@ -402,50 +349,35 @@ fn parse_headers(
 }
 
 fn decode_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Option<String> {
-    if let Some(mime) = &part.mime_type
-        && mime == mime_type
-        && let Some(body) = &part.body
-        && let Some(data) = &body.data
+    // Check if this part matches the desired MIME type
+    if part.mime_type.as_deref() == Some(mime_type)
+        && let Some(data) = part.body.as_ref().and_then(|b| b.data.as_ref())
     {
-        use base64::{Engine as _, engine::general_purpose};
         let data_str = String::from_utf8_lossy(data);
 
-        // Try decoding as base64url (Gmail's default)
+        // Gmail uses URL-safe base64 encoding
         let decoded = general_purpose::URL_SAFE_NO_PAD
-            .decode(data_str.trim().replace('-', "+").replace('_', "/"))
-            .or_else(|_| {
-                general_purpose::URL_SAFE
-                    .decode(data_str.trim().replace('-', "+").replace('_', "/"))
-            })
-            .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
+            .decode(data_str.trim())
+            .or_else(|_| general_purpose::URL_SAFE.decode(data_str.trim()))
             .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
 
         return match decoded {
             Ok(bytes) => String::from_utf8(bytes).ok(),
-            Err(_) => {
-                // If base64 decoding fails, it might already be raw content
-                String::from_utf8(data.clone()).ok()
-            }
+            Err(_) => String::from_utf8(data.clone()).ok(),
         };
     }
 
-    if let Some(parts) = &part.parts {
-        let mut full_body = String::new();
-        for p in parts {
-            if let Some(body) = decode_body(p, mime_type) {
-                full_body.push_str(&body);
-            }
-        }
-        if !full_body.is_empty() {
-            return Some(full_body);
-        }
-    }
+    // Recurse into sub-parts
+    let full_body: String = part
+        .parts
+        .iter()
+        .flatten()
+        .filter_map(|p| decode_body(p, mime_type))
+        .collect();
 
-    None
+    (!full_body.is_empty()).then_some(full_body)
 }
 
 fn has_label(label_ids: Option<&Vec<String>>, label: &str) -> bool {
-    label_ids
-        .map(|ids| ids.contains(&label.to_string()))
-        .unwrap_or(false)
+    label_ids.is_some_and(|ids| ids.iter().any(|id| id == label))
 }
