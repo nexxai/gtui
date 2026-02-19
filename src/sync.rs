@@ -98,13 +98,19 @@ pub fn spawn_sync_task(
                         let mut remote_ids = HashSet::new();
                         let mut oldest_date = i64::MAX;
 
-                        for id in &ids {
-                            let is_recently_modified = sync_state
-                                .lock()
-                                .map(|s| s.is_recently_modified(id))
-                                .unwrap_or(false);
+                        // Collect recently-modified IDs in a single lock
+                        let recently_modified: HashSet<String> = sync_state
+                            .lock()
+                            .map(|s| {
+                                ids.iter()
+                                    .filter(|id| s.is_recently_modified(id))
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
-                            if is_recently_modified {
+                        for id in &ids {
+                            if recently_modified.contains(id) {
                                 debug!(id, "skipping recently modified message");
                                 continue;
                             }
@@ -147,13 +153,20 @@ pub fn spawn_sync_task(
                                 .get_messages_with_dates_by_label(label_id, 200)
                                 .await
                         {
-                            for (local_id, local_date) in local_info {
-                                let is_recently_modified = sync_state
-                                    .lock()
-                                    .map(|s| s.is_recently_modified(&local_id))
-                                    .unwrap_or(false);
+                            // Single lock to filter out recently-modified messages
+                            let recently_modified_local: HashSet<String> = sync_state
+                                .lock()
+                                .map(|s| {
+                                    local_info
+                                        .iter()
+                                        .filter(|(id, _)| s.is_recently_modified(id))
+                                        .map(|(id, _)| id.clone())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
 
-                                if is_recently_modified {
+                            for (local_id, local_date) in local_info {
+                                if recently_modified_local.contains(&local_id) {
                                     continue;
                                 }
 
