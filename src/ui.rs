@@ -502,15 +502,14 @@ fn compose_border_style(is_focused: bool) -> Style {
 }
 
 /// Apply a titled border to a TextArea and render it into `area`.
-fn render_compose_field(f: &mut Frame, textarea: &TextArea<'_>, title: &str, is_focused: bool, area: Rect) {
-    let mut ta = textarea.clone();
-    ta.set_block(
+fn render_compose_field<'a>(f: &mut Frame, textarea: &mut TextArea<'a>, title: &'a str, is_focused: bool, area: Rect) {
+    textarea.set_block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
             .border_style(compose_border_style(is_focused)),
     );
-    f.render_widget(&ta, area);
+    f.render_widget(&*textarea, area);
 }
 
 fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
@@ -538,17 +537,17 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
 
         let mut chunk = 0;
 
-        render_compose_field(f, &cs.to, " To ", cs.focused_field == ComposeField::To, chunks[chunk]);
+        render_compose_field(f, &mut cs.to, " To ", cs.focused_field == ComposeField::To, chunks[chunk]);
         chunk += 1;
 
         if cs.show_cc_bcc {
-            render_compose_field(f, &cs.cc, " Cc ", cs.focused_field == ComposeField::Cc, chunks[chunk]);
+            render_compose_field(f, &mut cs.cc, " Cc ", cs.focused_field == ComposeField::Cc, chunks[chunk]);
             chunk += 1;
-            render_compose_field(f, &cs.bcc, " Bcc ", cs.focused_field == ComposeField::Bcc, chunks[chunk]);
+            render_compose_field(f, &mut cs.bcc, " Bcc ", cs.focused_field == ComposeField::Bcc, chunks[chunk]);
             chunk += 1;
         }
 
-        render_compose_field(f, &cs.subject, " Subject ", cs.focused_field == ComposeField::Subject, chunks[chunk]);
+        render_compose_field(f, &mut cs.subject, " Subject ", cs.focused_field == ComposeField::Subject, chunks[chunk]);
         chunk += 1;
 
         let body_title = if cs.show_cc_bcc {
@@ -556,7 +555,7 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
         } else {
             " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
         };
-        render_compose_field(f, &cs.body, body_title, cs.focused_field == ComposeField::Body, chunks[chunk]);
+        render_compose_field(f, &mut cs.body, body_title, cs.focused_field == ComposeField::Body, chunks[chunk]);
     }
 }
 
