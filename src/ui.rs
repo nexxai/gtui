@@ -48,39 +48,33 @@ pub struct ComposeState<'a> {
     pub show_cc_bcc: bool,
 }
 
+/// Create a single-line TextArea with no cursor-line highlight.
+fn single_line_textarea(text: &str) -> TextArea<'static> {
+    let sanitized = text.replace(['\n', '\r'], " ");
+    let lines: Vec<String> = sanitized.lines().map(String::from).collect();
+    let mut ta = TextArea::new(lines);
+    ta.set_cursor_line_style(Style::default());
+    ta
+}
+
 impl<'a> ComposeState<'a> {
     pub fn new(to: &str, cc: &str, bcc: &str, subject: &str, body: &str) -> Self {
-        let to_text = to.replace(['\n', '\r'], " ");
-        let cc_text = cc.replace(['\n', '\r'], " ");
-        let bcc_text = bcc.replace(['\n', '\r'], " ");
-        let subject_text = subject.replace(['\n', '\r'], " ");
-
-        let mut to_textarea = TextArea::from(to_text.lines());
-        let mut cc_textarea = TextArea::from(cc_text.lines());
-        let mut bcc_textarea = TextArea::from(bcc_text.lines());
-        let mut subject_textarea = TextArea::from(subject_text.lines());
-        let mut body_textarea = TextArea::from(body.lines());
-
-        let no_highlight = Style::default();
-        to_textarea.set_cursor_line_style(no_highlight);
-        cc_textarea.set_cursor_line_style(no_highlight);
-        bcc_textarea.set_cursor_line_style(no_highlight);
-        subject_textarea.set_cursor_line_style(no_highlight);
-        body_textarea.set_cursor_line_style(no_highlight);
+        let body_lines: Vec<String> = body.lines().map(String::from).collect();
+        let mut body_textarea = TextArea::new(body_lines);
+        body_textarea.set_cursor_line_style(Style::default());
         body_textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
-            to: to_textarea,
-            cc: cc_textarea,
-            bcc: bcc_textarea,
-            subject: subject_textarea,
+            to: single_line_textarea(to),
+            cc: single_line_textarea(cc),
+            bcc: single_line_textarea(bcc),
+            subject: single_line_textarea(subject),
             body: body_textarea,
             focused_field: ComposeField::To,
             show_cc_bcc: false,
         }
     }
 
-    /// Get the current text content of a field
     pub fn get_to(&self) -> String {
         self.to.lines().join("\n")
     }
@@ -496,6 +490,29 @@ fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
     f.render_widget(detail_paragraph, area);
 }
 
+/// Return a focused (cyan + bold) or unfocused (gray) border style for compose fields.
+fn compose_border_style(is_focused: bool) -> Style {
+    if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+/// Apply a titled border to a TextArea and render it into `area`.
+fn render_compose_field(f: &mut Frame, textarea: &TextArea<'_>, title: &str, is_focused: bool, area: Rect) {
+    let mut ta = textarea.clone();
+    ta.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(compose_border_style(is_focused)),
+    );
+    f.render_widget(&ta, area);
+}
+
 fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
     // Popup for composing
     if let UIMode::Composing = state.mode
@@ -519,98 +536,27 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
             .constraints(constraints)
             .split(area);
 
-        let mut current_chunk = 0;
+        let mut chunk = 0;
 
-        // To field
-        let to_style = if cs.focused_field == ComposeField::To {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        cs.to.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" To ")
-                .border_style(to_style),
-        );
-        f.render_widget(&cs.to, chunks[current_chunk]);
-        current_chunk += 1;
+        render_compose_field(f, &cs.to, " To ", cs.focused_field == ComposeField::To, chunks[chunk]);
+        chunk += 1;
 
-        // Cc/Bcc fields (optional)
         if cs.show_cc_bcc {
-            let cc_style = if cs.focused_field == ComposeField::Cc {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            cs.cc.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Cc ")
-                    .border_style(cc_style),
-            );
-            f.render_widget(&cs.cc, chunks[current_chunk]);
-            current_chunk += 1;
-
-            let bcc_style = if cs.focused_field == ComposeField::Bcc {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            cs.bcc.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Bcc ")
-                    .border_style(bcc_style),
-            );
-            f.render_widget(&cs.bcc, chunks[current_chunk]);
-            current_chunk += 1;
+            render_compose_field(f, &cs.cc, " Cc ", cs.focused_field == ComposeField::Cc, chunks[chunk]);
+            chunk += 1;
+            render_compose_field(f, &cs.bcc, " Bcc ", cs.focused_field == ComposeField::Bcc, chunks[chunk]);
+            chunk += 1;
         }
 
-        // Subject field
-        let sub_style = if cs.focused_field == ComposeField::Subject {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        cs.subject.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Subject ")
-                .border_style(sub_style),
-        );
-        f.render_widget(&cs.subject, chunks[current_chunk]);
-        current_chunk += 1;
+        render_compose_field(f, &cs.subject, " Subject ", cs.focused_field == ComposeField::Subject, chunks[chunk]);
+        chunk += 1;
 
-        // Body field
         let body_title = if cs.show_cc_bcc {
             " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Hide CC/BCC] "
         } else {
             " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
         };
-        let body_style = if cs.focused_field == ComposeField::Body {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        cs.body.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(body_title)
-                .border_style(body_style),
-        );
-        f.render_widget(&cs.body, chunks[current_chunk]);
+        render_compose_field(f, &cs.body, body_title, cs.focused_field == ComposeField::Body, chunks[chunk]);
     }
 }
 
