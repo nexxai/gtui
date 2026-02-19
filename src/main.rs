@@ -858,7 +858,7 @@ async fn main() -> anyhow::Result<()> {
     ui_state.sync_state = sync_state.clone();
 
     // Initial Auth setup
-    let secret = auth::Authenticator::load_secret("credentials.json").await?;
+    let secret = auth::load_secret("credentials.json").await?;
 
     use tokio::sync::mpsc;
     let (tx, mut rx) = mpsc::channel::<String>(1);
@@ -867,7 +867,7 @@ async fn main() -> anyhow::Result<()> {
     let (priority_tx, priority_rx) = mpsc::channel::<String>(16);
     let mut priority_rx = Some(priority_rx);
 
-    let auth_builder = auth::Authenticator::authenticate(secret, auth::TuiDelegate { tx }).await?;
+    let auth_builder = auth::authenticate(secret, auth::TuiDelegate { tx }).await?;
 
     let auth_clone = auth_builder.clone();
     tokio::spawn(async move {
