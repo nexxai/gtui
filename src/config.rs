@@ -1,6 +1,8 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub keybindings: Keybindings,
@@ -52,27 +54,35 @@ impl Default for Config {
                 undo: keys(&["u"]),
             },
             signatures: Signatures::default(),
-            sync_interval_seconds: default_sync_interval_seconds(),
+            sync_interval_seconds: DEFAULT_SYNC_INTERVAL_SECONDS,
         }
     }
 }
 
 fn keys(entries: &[&str]) -> Vec<String> {
-    entries.iter().map(|entry| (*entry).to_string()).collect()
+    entries.iter().map(|s| (*s).to_string()).collect()
 }
 
 fn default_sync_interval_seconds() -> u64 {
-    30
+    DEFAULT_SYNC_INTERVAL_SECONDS
 }
 
+impl Config {
+    pub fn load() -> Self {
+        std::fs::read_to_string("settings.toml")
+            .ok()
+            .and_then(|content| toml::from_str(&content).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// Parse a key binding string like `"ctrl-s"` into a `(KeyCode, KeyModifiers)` pair.
 pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
-    let mut parts: Vec<&str> = key_str.split('-').collect();
+    let parts: Vec<&str> = key_str.split('-').collect();
+    let (modifiers_parts, base_key_str) = parts.split_at(parts.len().saturating_sub(1));
+
     let mut modifiers = KeyModifiers::empty();
-
-    // We process from the end to find the base key, then consume prefixes
-    let base_key_str = parts.pop().unwrap_or("");
-
-    for part in parts {
+    for part in modifiers_parts {
         match part.to_lowercase().as_str() {
             "ctrl" => modifiers.insert(KeyModifiers::CONTROL),
             "alt" => modifiers.insert(KeyModifiers::ALT),
@@ -83,7 +93,8 @@ pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
         }
     }
 
-    let code = match base_key_str {
+    let base = base_key_str.first().copied().unwrap_or("");
+    let code = match base {
         "Backspace" => KeyCode::Backspace,
         "Enter" => KeyCode::Enter,
         "Left" => KeyCode::Left,
@@ -101,6 +112,7 @@ pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
     (code, modifiers)
 }
 
+/// Check whether a key event matches any of the given binding strings.
 pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
     bindings.iter().any(|b| {
         let (code, modifiers) = parse_key_string(b);
@@ -108,25 +120,12 @@ pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
     })
 }
 
-impl Config {
-    pub fn load() -> Self {
-        use std::fs;
-        if let Ok(content) = fs::read_to_string("settings.toml")
-            && let Ok(config) = toml::from_str(&content)
-        {
-            return config;
-        }
-        Self::default()
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn matches_key_requires_exact_modifiers() {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
         let event = KeyEvent::new(
             KeyCode::Char('s'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
@@ -139,7 +138,6 @@ mod tests {
     #[test]
     fn default_sync_interval_is_30() {
         let config = Config::default();
-
         assert_eq!(config.sync_interval_seconds, 30);
     }
 }
