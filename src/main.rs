@@ -562,11 +562,13 @@ async fn handle_undo_action(
                 label_id,
                 original_index,
             } => {
-                let representative = messages.first().cloned().unwrap_or_default();
+                let Some(representative) = messages.first().cloned() else {
+                    return Ok(true);
+                };
                 let insert_index = (*original_index).min(ui_state.messages.len());
                 ui_state
                     .messages
-                    .insert(insert_index, representative.clone());
+                    .insert(insert_index, representative);
                 ui_state.selected_message_index = insert_index;
 
                 let _ = app.db.upsert_messages(messages, label_id).await;
@@ -588,7 +590,9 @@ async fn handle_undo_action(
                 label_ids,
                 original_index,
             } => {
-                let representative = messages.first().cloned().unwrap_or_default();
+                let Some(representative) = messages.first().cloned() else {
+                    return Ok(true);
+                };
                 let current_label = ui_state
                     .labels
                     .get(ui_state.selected_label_index)
@@ -601,7 +605,7 @@ async fn handle_undo_action(
                     let insert_index = (*original_index).min(ui_state.messages.len());
                     ui_state
                         .messages
-                        .insert(insert_index, representative.clone());
+                        .insert(insert_index, representative);
                     ui_state.selected_message_index = insert_index;
                 }
 
