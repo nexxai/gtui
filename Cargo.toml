@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 default-run = "gtui"
 
+[lints.clippy]
+print_stderr = "deny"
+print_stdout = "deny"
+dbg_macro = "deny"
+
 [dependencies]
 # TUI and Terminal Handling
 crossterm = { version = "0.28", features = ["event-stream"] }
