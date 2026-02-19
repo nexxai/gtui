@@ -27,6 +27,7 @@ impl Database {
     // -- Labels --
 
     pub async fn upsert_labels(&self, labels: &[models::Label]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         for label in labels {
             sqlx::query(include_str!("../sql/upsert_labels.sql"))
                 .bind(&label.id)
@@ -34,9 +35,10 @@ impl Database {
                 .bind(&label.label_type)
                 .bind(&label.color_foreground)
                 .bind(&label.color_background)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -68,6 +70,7 @@ impl Database {
         messages: &[models::Message],
         label_id: &str,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         for msg in messages {
             sqlx::query(include_str!("../sql/upsert_messages.sql"))
                 .bind(&msg.id)
@@ -80,15 +83,16 @@ impl Database {
                 .bind(&msg.body_plain)
                 .bind(&msg.body_html)
                 .bind(msg.is_read)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
             sqlx::query(include_str!("../sql/link_message_label.sql"))
                 .bind(&msg.id)
                 .bind(label_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
