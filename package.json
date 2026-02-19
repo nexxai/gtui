@@ -14,10 +14,7 @@
         "@semantic-release/github",
         {
           "assets": [
-            {
-              "path": "release/**",
-              "label": "Release binaries"
-            }
+            "release/**"
           ]
         }
       ]
