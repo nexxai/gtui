@@ -23,15 +23,23 @@ jobs:
 
       - run: cargo test --release
 
-  release:
-    if: github.ref == 'refs/heads/main'
+  build:
     needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
-      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -42,19 +50,69 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.target }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - run: cargo build --release
-
-      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          targets: ${{ matrix.target }}
 
-      - run: npm ci
+      - name: Install cross for Linux targets
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install cross
+
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build macOS/Windows
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtui-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/gtui${{ matrix.ext }}
+          retention-days: 1
+
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Prepare release artifacts
+        run: |
+          mkdir -p release
+          for dir in artifacts/gtui-*; do
+            filename=$(basename "$dir"/gtui*)
+            target=$(basename "$dir")
+            if [[ "$target" == *"windows"* ]]; then
+              cp "$dir"/gtui.exe "release/gtui-${target}.exe"
+            else
+              cp "$dir/gtui" "release/gtui-${target}"
+              chmod +x "release/gtui-${target}"
+            fi
+          done
+          ls -la release/
 
       - uses: cycjimmy/semantic-release-action@v6
         env:
