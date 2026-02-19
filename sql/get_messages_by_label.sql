@@ -1,4 +1,4 @@
-SELECT m.id, m.thread_id, m.snippet, m.from_address, m.to_address, m.subject, MAX(m.internal_date) as internal_date, m.body_plain, m.body_html, m.is_read,
+SELECT m.id, m.thread_id, m.snippet, m.from_address, m.to_address, m.subject, MAX(m.internal_date) as latest_date, m.body_plain, m.body_html, m.is_read,
 EXISTS (
     SELECT 1 FROM messages m2
     JOIN message_labels ml2 ON m2.id = ml2.message_id
