@@ -12,8 +12,8 @@ dbg_macro = "deny"
 [dependencies]
 # TUI and Terminal Handling
 crossterm = { version = "0.28", features = ["event-stream"] }
-ratatui = "*"
-tui-textarea = { package = "tui-textarea-2", version = "*" }
+ratatui = "0.30"
+tui-textarea = { package = "tui-textarea-2", version = "0.9" }
 
 # Async Runtime
 tokio = { version = "1", features = ["full"] }
