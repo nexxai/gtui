@@ -1,5 +1,5 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
 
@@ -18,49 +18,79 @@ pub struct Signatures {
     pub reply: Option<String>,
 }
 
+/// A set of key bindings parsed eagerly from string definitions.
+///
+/// Deserializes from `Vec<String>` (e.g. `["ctrl-s", "Enter"]`) and stores
+/// pre-parsed `(KeyCode, KeyModifiers)` pairs so that `matches_key` never
+/// has to re-parse at runtime.
+#[derive(Debug, Clone)]
+pub struct KeyBindingSet(Vec<(KeyCode, KeyModifiers)>);
+
+impl KeyBindingSet {
+    fn from_strs(entries: &[&str]) -> Self {
+        Self(entries.iter().map(|s| parse_key_string(s)).collect())
+    }
+}
+
+impl Serialize for KeyBindingSet {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Round-trip as Vec<String> is not needed in practice, but keeps
+        // the Serialize derive on Keybindings working for debug/test.
+        let strings: Vec<String> = self
+            .0
+            .iter()
+            .map(|(code, mods)| format_key_binding(*code, *mods))
+            .collect();
+        strings.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyBindingSet {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let strings: Vec<String> = Vec::deserialize(deserializer)?;
+        Ok(Self(strings.iter().map(|s| parse_key_string(s)).collect()))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keybindings {
-    pub next_panel: Vec<String>,
-    pub prev_panel: Vec<String>,
-    pub move_up: Vec<String>,
-    pub move_down: Vec<String>,
-    pub mark_read: Vec<String>,
-    pub new_message: Vec<String>,
-    pub reply: Vec<String>,
-    pub forward: Vec<String>,
-    pub delete: Vec<String>,
-    pub archive: Vec<String>,
-    pub send_message: Vec<String>,
-    pub quit: Vec<String>,
-    pub undo: Vec<String>,
+    pub next_panel: KeyBindingSet,
+    pub prev_panel: KeyBindingSet,
+    pub move_up: KeyBindingSet,
+    pub move_down: KeyBindingSet,
+    pub mark_read: KeyBindingSet,
+    pub new_message: KeyBindingSet,
+    pub reply: KeyBindingSet,
+    pub forward: KeyBindingSet,
+    pub delete: KeyBindingSet,
+    pub archive: KeyBindingSet,
+    pub send_message: KeyBindingSet,
+    pub quit: KeyBindingSet,
+    pub undo: KeyBindingSet,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             keybindings: Keybindings {
-                next_panel: keys(&["l", "Right", "Tab"]),
-                prev_panel: keys(&["h", "Left", "BackTab"]),
-                move_up: keys(&["k", "Up"]),
-                move_down: keys(&["j", "Down"]),
-                mark_read: keys(&[" "]),
-                new_message: keys(&["n"]),
-                reply: keys(&["r"]),
-                forward: keys(&["f"]),
-                delete: keys(&["Backspace", "d"]),
-                archive: keys(&["a"]),
-                send_message: keys(&["ctrl-s"]),
-                quit: keys(&["q"]),
-                undo: keys(&["u"]),
+                next_panel: KeyBindingSet::from_strs(&["l", "Right", "Tab"]),
+                prev_panel: KeyBindingSet::from_strs(&["h", "Left", "BackTab"]),
+                move_up: KeyBindingSet::from_strs(&["k", "Up"]),
+                move_down: KeyBindingSet::from_strs(&["j", "Down"]),
+                mark_read: KeyBindingSet::from_strs(&[" "]),
+                new_message: KeyBindingSet::from_strs(&["n"]),
+                reply: KeyBindingSet::from_strs(&["r"]),
+                forward: KeyBindingSet::from_strs(&["f"]),
+                delete: KeyBindingSet::from_strs(&["Backspace", "d"]),
+                archive: KeyBindingSet::from_strs(&["a"]),
+                send_message: KeyBindingSet::from_strs(&["ctrl-s"]),
+                quit: KeyBindingSet::from_strs(&["q"]),
+                undo: KeyBindingSet::from_strs(&["u"]),
             },
             signatures: Signatures::default(),
             sync_interval_seconds: DEFAULT_SYNC_INTERVAL_SECONDS,
         }
     }
-}
-
-fn keys(entries: &[&str]) -> Vec<String> {
-    entries.iter().map(|s| (*s).to_string()).collect()
 }
 
 fn default_sync_interval_seconds() -> u64 {
@@ -77,7 +107,7 @@ impl Config {
 }
 
 /// Parse a key binding string like `"ctrl-s"` into a `(KeyCode, KeyModifiers)` pair.
-pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
+fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
     let parts: Vec<&str> = key_str.split('-').collect();
     let (modifiers_parts, base_key_str) = parts.split_at(parts.len().saturating_sub(1));
 
@@ -112,12 +142,48 @@ pub fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
     (code, modifiers)
 }
 
-/// Check whether a key event matches any of the given binding strings.
-pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
-    bindings.iter().any(|b| {
-        let (code, modifiers) = parse_key_string(b);
-        event.code == code && event.modifiers == modifiers
-    })
+/// Format a (KeyCode, KeyModifiers) pair back to a string for serialization.
+fn format_key_binding(code: KeyCode, modifiers: KeyModifiers) -> String {
+    let mut parts = Vec::new();
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_string());
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_string());
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        parts.push("super".to_string());
+    }
+    if modifiers.contains(KeyModifiers::META) {
+        parts.push("meta".to_string());
+    }
+
+    let key = match code {
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => "BackTab".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Char(c) => c.to_string(),
+        _ => "Unknown".to_string(),
+    };
+    parts.push(key);
+    parts.join("-")
+}
+
+/// Check whether a key event matches any binding in the set.
+pub fn matches_key(event: KeyEvent, bindings: &KeyBindingSet) -> bool {
+    bindings
+        .0
+        .iter()
+        .any(|(code, modifiers)| event.code == *code && event.modifiers == *modifiers)
 }
 
 #[cfg(test)]
@@ -130,7 +196,7 @@ mod tests {
             KeyCode::Char('s'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         );
-        let bindings = vec!["ctrl-s".to_string()];
+        let bindings = KeyBindingSet::from_strs(&["ctrl-s"]);
 
         assert!(!matches_key(event, &bindings));
     }
@@ -139,5 +205,15 @@ mod tests {
     fn default_sync_interval_is_30() {
         let config = Config::default();
         assert_eq!(config.sync_interval_seconds, 30);
+    }
+
+    #[test]
+    fn keybinding_set_deserializes_from_strings() {
+        let json = r#"["ctrl-s", "Enter", "a"]"#;
+        let set: KeyBindingSet = serde_json::from_str(json).unwrap();
+        assert_eq!(set.0.len(), 3);
+        assert_eq!(set.0[0], (KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(set.0[1], (KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(set.0[2], (KeyCode::Char('a'), KeyModifiers::empty()));
     }
 }
