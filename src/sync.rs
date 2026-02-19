@@ -91,7 +91,7 @@ pub fn spawn_sync_task(
                     }
 
                     if let Ok((ids, next_page_token)) = sync_client
-                        .list_messages(vec![label_id.to_string()], 100, None)
+                        .list_messages(&[label_id.to_string()], 100, None)
                         .await
                     {
                         let mut messages = Vec::new();

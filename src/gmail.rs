@@ -64,7 +64,7 @@ impl GmailClient {
 
     pub async fn list_messages(
         &self,
-        label_ids: Vec<String>,
+        label_ids: &[String],
         max_results: u32,
         page_token: Option<String>,
     ) -> Result<(Vec<String>, Option<String>)> {
@@ -74,7 +74,7 @@ impl GmailClient {
             .messages_list("me")
             .max_results(max_results);
 
-        for label_id in &label_ids {
+        for label_id in label_ids {
             req = req.add_label_ids(label_id);
         }
 
@@ -122,8 +122,8 @@ impl GmailClient {
             internal_date,
             body_plain,
             body_html: None,
-            is_read: !has_label(msg.label_ids.as_ref(), "UNREAD"),
-            has_sent_reply: has_label(msg.label_ids.as_ref(), "SENT"),
+            is_read: !has_label(msg.label_ids.as_deref(), "UNREAD"),
+            has_sent_reply: has_label(msg.label_ids.as_deref(), "SENT"),
         })
     }
 
@@ -378,6 +378,6 @@ fn decode_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Optio
     (!full_body.is_empty()).then_some(full_body)
 }
 
-fn has_label(label_ids: Option<&Vec<String>>, label: &str) -> bool {
+fn has_label(label_ids: Option<&[String]>, label: &str) -> bool {
     label_ids.is_some_and(|ids| ids.iter().any(|id| id == label))
 }
