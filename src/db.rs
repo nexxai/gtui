@@ -3,6 +3,7 @@ use anyhow::Result;
 use inflections::case::to_title_case;
 use sqlx::{Row, sqlite::SqlitePool};
 
+#[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
 }

@@ -53,15 +53,12 @@ fn drain_priority_label(rx: &mut mpsc::Receiver<String>) -> Option<String> {
 
 pub fn spawn_sync_task(
     sync_client: GmailClient,
-    db_url: String,
+    sync_db: db::Database,
     refresh_tx: mpsc::Sender<()>,
     sync_state: Arc<Mutex<SyncState>>,
     mut priority_rx: mpsc::Receiver<String>,
 ) {
     tokio::spawn(async move {
-        let Ok(sync_db) = db::Database::new(&db_url).await else {
-            return;
-        };
 
         let sync_interval_seconds = Config::load().sync_interval_seconds;
 

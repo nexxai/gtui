@@ -31,7 +31,6 @@ use std::sync::{Arc, Mutex};
 struct App {
     config: Config,
     db: db::Database,
-    db_url: String,
     gmail_client: Option<GmailClient>,
     sync_state: Arc<Mutex<sync::SyncState>>,
     priority_tx: tokio::sync::mpsc::Sender<String>,
@@ -199,16 +198,14 @@ fn handle_message_actions(
             let id = m.id.clone();
             if let Some(gmail) = &app.gmail_client {
                 let gmail = gmail.clone();
-                let db_url = app.db_url.clone();
+                let db_clone = app.db.clone();
                 tokio::spawn(async move {
-                    if let Ok(db_clone) = db::Database::new(&db_url).await {
-                        if new_status {
-                            let _ = gmail.mark_as_read(&id).await;
-                        } else {
-                            let _ = gmail.mark_as_unread(&id).await;
-                        }
-                        let _ = db_clone.mark_message_as_read(&id, new_status).await;
+                    if new_status {
+                        let _ = gmail.mark_as_read(&id).await;
+                    } else {
+                        let _ = gmail.mark_as_unread(&id).await;
                     }
+                    let _ = db_clone.mark_message_as_read(&id, new_status).await;
                 });
             }
         }
@@ -673,12 +670,11 @@ fn handle_composing_keys(
                     cs.get_body(),
                 );
                 let gmail = gmail.clone();
-                let db_url = app.db_url.clone();
+                let db_clone = app.db.clone();
                 let refresh_tx = app.refresh_tx.clone();
                 tokio::spawn(async move {
                     if let Ok(Some(msg_id)) = gmail.send_message(&to, &cc, &bcc, &sub, &body).await
                         && let Ok(sent_msg) = gmail.get_message(&msg_id).await
-                        && let Ok(db_clone) = db::Database::new(&db_url).await
                     {
                         let _ = db_clone.upsert_messages(&[sent_msg], "SENT").await;
                         let _ = refresh_tx.send(()).await;
@@ -760,8 +756,7 @@ async fn main() -> anyhow::Result<()> {
     let debug_logging = std::env::args().any(|arg| arg == "--debug");
     logging::init(debug_logging);
 
-    let db_url = "sqlite:gtui.db?mode=rwc".to_string();
-    let db = db::Database::new(&db_url).await?;
+    let db = db::Database::new("sqlite:gtui.db?mode=rwc").await?;
     db.run_migrations().await?;
 
     // Handle token reset
@@ -809,7 +804,6 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App {
         config,
         db,
-        db_url,
         gmail_client: None,
         sync_state: sync_state.clone(),
         priority_tx,
@@ -852,13 +846,13 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let sync_client = client.clone();
-            let sync_db_url = app.db_url.clone();
+            let sync_db = app.db.clone();
             let sync_refresh_tx = app.refresh_tx.clone();
             let sync_state_clone = sync_state.clone();
             let priority_rx = priority_rx.take().unwrap();
             sync::spawn_sync_task(
                 sync_client,
-                sync_db_url,
+                sync_db,
                 sync_refresh_tx,
                 sync_state_clone,
                 priority_rx,
