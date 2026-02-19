@@ -77,7 +77,7 @@ impl Database {
                 .bind(&msg.from_address)
                 .bind(&msg.to_address)
                 .bind(&msg.subject)
-                .bind(&msg.internal_date)
+                .bind(msg.internal_date)
                 .bind(&msg.body_plain)
                 .bind(&msg.body_html)
                 .bind(msg.is_read)

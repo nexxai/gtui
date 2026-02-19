@@ -78,11 +78,11 @@ pub fn spawn_sync_task(
 
                     // Drain priority channel and move priority label to front
                     let priority_label = drain_priority_label(&mut priority_rx);
-                    if let Some(ref priority) = priority_label {
-                        if let Some(pos) = label_ids.iter().position(|id| id == priority) {
-                            let p = label_ids.remove(pos);
-                            label_ids.insert(0, p);
-                        }
+                    if let Some(ref priority) = priority_label
+                        && let Some(pos) = label_ids.iter().position(|id| id == priority)
+                    {
+                        let p = label_ids.remove(pos);
+                        label_ids.insert(0, p);
                     }
 
                     for label_id in &label_ids {
@@ -129,10 +129,10 @@ pub fn spawn_sync_task(
                                             oldest_date = oldest_date.min(msg.internal_date);
                                             messages.push(msg);
                                         }
-                                    } else {
-                                        if let Ok(Some(date)) = sync_db.get_message_date(id).await {
-                                            oldest_date = oldest_date.min(date);
-                                        }
+                                    } else if let Ok(Some(date)) =
+                                        sync_db.get_message_date(id).await
+                                    {
+                                        oldest_date = oldest_date.min(date);
                                     }
                                 }
                             }
@@ -160,41 +160,38 @@ pub fn spawn_sync_task(
 
                             // Detection of removals (archived/deleted from other clients)
                             // Only do this if we have the complete remote picture
-                            if should_remove {
-                                if let Ok(local_info) = sync_db
+                            if should_remove
+                                && let Ok(local_info) = sync_db
                                     .get_messages_with_dates_by_label(label_id, 200)
                                     .await
-                                {
-                                    for (local_id, local_date) in local_info {
-                                        // Skip messages that were recently modified locally
-                                        let is_recently_modified =
-                                            if let Ok(state) = sync_state.lock() {
-                                                state.is_recently_modified(&local_id)
-                                            } else {
-                                                false
-                                            };
+                            {
+                                for (local_id, local_date) in local_info {
+                                    // Skip messages that were recently modified locally
+                                    let is_recently_modified = if let Ok(state) = sync_state.lock()
+                                    {
+                                        state.is_recently_modified(&local_id)
+                                    } else {
+                                        false
+                                    };
 
-                                        if is_recently_modified {
-                                            continue;
-                                        }
+                                    if is_recently_modified {
+                                        continue;
+                                    }
 
-                                        // Only remove if the message is within the date range
-                                        // of what the remote returned (i.e. it SHOULD have been
-                                        // in the remote set if it still had this label)
-                                        if local_date >= oldest_date
-                                            && !remote_ids.contains(&local_id)
-                                        {
-                                            if let Ok(_) = sync_db
-                                                .remove_label_from_message(&local_id, label_id)
-                                                .await
-                                            {
-                                                has_new_data = true;
-                                                sync_client.debug_log(&format!(
+                                    // Only remove if the message is within the date range
+                                    // of what the remote returned (i.e. it SHOULD have been
+                                    // in the remote set if it still had this label)
+                                    if local_date >= oldest_date
+                                        && !remote_ids.contains(&local_id)
+                                        && let Ok(_) = sync_db
+                                            .remove_label_from_message(&local_id, label_id)
+                                            .await
+                                    {
+                                        has_new_data = true;
+                                        sync_client.debug_log(&format!(
                                                     "REMOVAL: Confirmed {} missing from {} (oldest_date: {})",
                                                     local_id, label_id, oldest_date
                                                 ));
-                                            }
-                                        }
                                     }
                                 }
                             }

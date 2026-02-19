@@ -2,6 +2,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::env;
 
+#[allow(clippy::print_stderr, clippy::print_stdout)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();

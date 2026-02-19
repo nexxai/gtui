@@ -402,33 +402,31 @@ fn parse_headers(
 }
 
 fn decode_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Option<String> {
-    if let Some(mime) = &part.mime_type {
-        if mime == mime_type {
-            if let Some(body) = &part.body {
-                if let Some(data) = &body.data {
-                    use base64::{Engine as _, engine::general_purpose};
-                    let data_str = String::from_utf8_lossy(data);
+    if let Some(mime) = &part.mime_type
+        && mime == mime_type
+        && let Some(body) = &part.body
+        && let Some(data) = &body.data
+    {
+        use base64::{Engine as _, engine::general_purpose};
+        let data_str = String::from_utf8_lossy(data);
 
-                    // Try decoding as base64url (Gmail's default)
-                    let decoded = general_purpose::URL_SAFE_NO_PAD
-                        .decode(data_str.trim().replace('-', "+").replace('_', "/"))
-                        .or_else(|_| {
-                            general_purpose::URL_SAFE
-                                .decode(data_str.trim().replace('-', "+").replace('_', "/"))
-                        })
-                        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
-                        .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
+        // Try decoding as base64url (Gmail's default)
+        let decoded = general_purpose::URL_SAFE_NO_PAD
+            .decode(data_str.trim().replace('-', "+").replace('_', "/"))
+            .or_else(|_| {
+                general_purpose::URL_SAFE
+                    .decode(data_str.trim().replace('-', "+").replace('_', "/"))
+            })
+            .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(data_str.trim()))
+            .or_else(|_| general_purpose::STANDARD.decode(data_str.trim()));
 
-                    return match decoded {
-                        Ok(bytes) => String::from_utf8(bytes).ok(),
-                        Err(_) => {
-                            // If base64 decoding fails, it might already be raw content
-                            String::from_utf8(data.clone()).ok()
-                        }
-                    };
-                }
+        return match decoded {
+            Ok(bytes) => String::from_utf8(bytes).ok(),
+            Err(_) => {
+                // If base64 decoding fails, it might already be raw content
+                String::from_utf8(data.clone()).ok()
             }
-        }
+        };
     }
 
     if let Some(parts) = &part.parts {

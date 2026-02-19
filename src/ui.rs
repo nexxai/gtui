@@ -51,10 +51,10 @@ pub struct ComposeState<'a> {
 
 impl<'a> ComposeState<'a> {
     pub fn new(to: &str, cc: &str, bcc: &str, subject: &str, body: &str) -> Self {
-        let to_text = to.replace('\n', " ").replace('\r', " ");
-        let cc_text = cc.replace('\n', " ").replace('\r', " ");
-        let bcc_text = bcc.replace('\n', " ").replace('\r', " ");
-        let subject_text = subject.replace('\n', " ").replace('\r', " ");
+        let to_text = to.replace(['\n', '\r'], " ");
+        let cc_text = cc.replace(['\n', '\r'], " ");
+        let bcc_text = bcc.replace(['\n', '\r'], " ");
+        let subject_text = subject.replace(['\n', '\r'], " ");
 
         let mut to_textarea = TextArea::from(to_text.lines());
         let mut cc_textarea = TextArea::from(cc_text.lines());
@@ -336,9 +336,9 @@ fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
             };
 
             let inner_len = list_width.saturating_sub(2);
-            let line1 = format!("{}", pad(s_label, inner_len));
-            let line2 = format!("{}", pad(t_label, inner_len));
-            let line3 = format!("{}", pad(sub_label, inner_len));
+            let line1 = pad(s_label, inner_len).to_string();
+            let line2 = pad(t_label, inner_len).to_string();
+            let line3 = pad(sub_label, inner_len).to_string();
 
             let is_selected = i == state.selected_message_index;
             let indicator = if is_selected { "█" } else { " " };
@@ -475,7 +475,7 @@ fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
                         .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))
                 )
             ));
-            detail_content.push_str("\n");
+            detail_content.push('\n');
             detail_content.push_str(DETAIL_SEPARATOR);
             detail_content.push_str("\n\n");
         }
@@ -520,119 +520,119 @@ fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
 
 fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
     // Popup for composing
-    if let UIMode::Composing = state.mode {
-        if let Some(cs) = &mut state.compose_state {
-            let area = centered_rect(80, 80, f.area());
-            f.render_widget(Clear, area);
+    if let UIMode::Composing = state.mode
+        && let Some(cs) = &mut state.compose_state
+    {
+        let area = centered_rect(80, 80, f.area());
+        f.render_widget(Clear, area);
 
-            let mut constraints = vec![
-                Constraint::Length(3), // To
-            ];
-            if cs.show_cc_bcc {
-                constraints.push(Constraint::Length(3)); // Cc
-                constraints.push(Constraint::Length(3)); // Bcc
-            }
-            constraints.push(Constraint::Length(3)); // Subject
-            constraints.push(Constraint::Min(10)); // Body
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints(constraints)
-                .split(area);
-
-            let mut current_chunk = 0;
-
-            // To field
-            let to_style = if cs.focused_field == ComposeField::To {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            cs.to.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" To ")
-                    .border_style(to_style),
-            );
-            f.render_widget(&cs.to, chunks[current_chunk]);
-            current_chunk += 1;
-
-            // Cc/Bcc fields (optional)
-            if cs.show_cc_bcc {
-                let cc_style = if cs.focused_field == ComposeField::Cc {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                cs.cc.set_block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Cc ")
-                        .border_style(cc_style),
-                );
-                f.render_widget(&cs.cc, chunks[current_chunk]);
-                current_chunk += 1;
-
-                let bcc_style = if cs.focused_field == ComposeField::Bcc {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                };
-                cs.bcc.set_block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Bcc ")
-                        .border_style(bcc_style),
-                );
-                f.render_widget(&cs.bcc, chunks[current_chunk]);
-                current_chunk += 1;
-            }
-
-            // Subject field
-            let sub_style = if cs.focused_field == ComposeField::Subject {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            cs.subject.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Subject ")
-                    .border_style(sub_style),
-            );
-            f.render_widget(&cs.subject, chunks[current_chunk]);
-            current_chunk += 1;
-
-            // Body field
-            let body_title = if cs.show_cc_bcc {
-                " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Hide CC/BCC] "
-            } else {
-                " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
-            };
-            let body_style = if cs.focused_field == ComposeField::Body {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-
-            cs.body.set_block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(body_title)
-                    .border_style(body_style),
-            );
-            f.render_widget(&cs.body, chunks[current_chunk]);
+        let mut constraints = vec![
+            Constraint::Length(3), // To
+        ];
+        if cs.show_cc_bcc {
+            constraints.push(Constraint::Length(3)); // Cc
+            constraints.push(Constraint::Length(3)); // Bcc
         }
+        constraints.push(Constraint::Length(3)); // Subject
+        constraints.push(Constraint::Min(10)); // Body
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
+        let mut current_chunk = 0;
+
+        // To field
+        let to_style = if cs.focused_field == ComposeField::To {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        cs.to.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" To ")
+                .border_style(to_style),
+        );
+        f.render_widget(&cs.to, chunks[current_chunk]);
+        current_chunk += 1;
+
+        // Cc/Bcc fields (optional)
+        if cs.show_cc_bcc {
+            let cc_style = if cs.focused_field == ComposeField::Cc {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            cs.cc.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Cc ")
+                    .border_style(cc_style),
+            );
+            f.render_widget(&cs.cc, chunks[current_chunk]);
+            current_chunk += 1;
+
+            let bcc_style = if cs.focused_field == ComposeField::Bcc {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            cs.bcc.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Bcc ")
+                    .border_style(bcc_style),
+            );
+            f.render_widget(&cs.bcc, chunks[current_chunk]);
+            current_chunk += 1;
+        }
+
+        // Subject field
+        let sub_style = if cs.focused_field == ComposeField::Subject {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        cs.subject.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Subject ")
+                .border_style(sub_style),
+        );
+        f.render_widget(&cs.subject, chunks[current_chunk]);
+        current_chunk += 1;
+
+        // Body field
+        let body_title = if cs.show_cc_bcc {
+            " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Hide CC/BCC] "
+        } else {
+            " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
+        };
+        let body_style = if cs.focused_field == ComposeField::Body {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        cs.body.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(body_title)
+                .border_style(body_style),
+        );
+        f.render_widget(&cs.body, chunks[current_chunk]);
     }
 }
 

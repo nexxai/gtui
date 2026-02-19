@@ -111,10 +111,10 @@ pub fn matches_key(event: KeyEvent, bindings: &[String]) -> bool {
 impl Config {
     pub fn load() -> Self {
         use std::fs;
-        if let Ok(content) = fs::read_to_string("settings.toml") {
-            if let Ok(config) = toml::from_str(&content) {
-                return config;
-            }
+        if let Ok(content) = fs::read_to_string("settings.toml")
+            && let Ok(config) = toml::from_str(&content)
+        {
+            return config;
         }
         Self::default()
     }
