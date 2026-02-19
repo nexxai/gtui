@@ -6,11 +6,13 @@ mod logging;
 mod models;
 mod sync;
 mod text;
+mod toast;
 mod ui;
 mod undo;
 
 use crate::config::{Config, matches_key};
 use crate::gmail::GmailClient;
+use crate::toast::{Toast, ToastPosition};
 use crate::ui::FocusedPanel;
 use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
@@ -379,11 +381,11 @@ async fn handle_delete_action(
         if let Some(gmail) = &gmail_client {
             match gmail.trash_messages(&message_ids).await {
                 Ok(_) => {
-                    ui_state.status_message = Some("Deleted successfully".to_string());
+                    ui_state.toast = Some(Toast::new("Deleted successfully", ToastPosition::BottomRight));
                 }
                 Err(e) => {
                     eprintln!("Error trashing messages: {}", e);
-                    ui_state.status_message = Some(format!("Delete failed: {}", e));
+                    ui_state.toast = Some(Toast::new(format!("Delete failed: {}", e), ToastPosition::BottomRight));
                     api_succeeded = false;
                     // Restore messages to database since API failed
                     if let Err(e) = db
@@ -498,16 +500,15 @@ async fn handle_archive_action(
             match result {
                 Ok(_) => {
                     if skipped_labels.is_empty() {
-                        ui_state.status_message = Some("Archived successfully".to_string());
+                        ui_state.toast = Some(Toast::new("Archived successfully", ToastPosition::BottomRight));
                     } else {
                         let skipped_list = skipped_labels.join(", ");
-                        ui_state.status_message =
-                            Some(format!("Archived (cannot remove label: {})", skipped_list));
+                        ui_state.toast = Some(Toast::new(format!("Archived (cannot remove label: {})", skipped_list), ToastPosition::BottomRight));
                     }
                 }
                 Err(e) => {
                     eprintln!("Error archiving messages: {}", e);
-                    ui_state.status_message = Some(format!("Archive failed: {}", e));
+                    ui_state.toast = Some(Toast::new(format!("Archive failed: {}", e), ToastPosition::BottomRight));
                     api_succeeded = false;
                     // Restore label since API failed
                     for label_id in &removable_labels {
@@ -665,7 +666,7 @@ async fn handle_undo_action(
                     }
                 }
             }
-            ui_state.status_message = Some(format!("Undone: {}", description));
+            ui_state.toast = Some(Toast::new(format!("Undone: {}", description), ToastPosition::BottomRight));
         }
     }
 
@@ -920,6 +921,17 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
 
+        // Check toast timeout
+        if let Some(toast) = &ui_state.toast {
+            if toast.action.is_none() {
+                if let Some(elapsed) = toast.elapsed() {
+                    if elapsed >= toast.duration {
+                        ui_state.toast = None;
+                    }
+                }
+            }
+        }
+
         terminal.draw(|f| ui::render(f, &mut ui_state))?;
 
         if !event::poll(std::time::Duration::from_millis(100))? {
@@ -939,9 +951,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ui::UIMode::Browsing => {
-                    // Clear status message on any keypress (will be set again if undo is pressed)
+                    // Clear toast on any keypress (will be set again if action is pressed)
                     if !matches_key(key, &config.keybindings.undo) {
-                        ui_state.status_message = None;
+                        ui_state.toast = None;
                     }
                     if matches_key(key, &config.keybindings.quit) {
                         break;

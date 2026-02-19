@@ -2,6 +2,7 @@ use crate::db;
 use crate::logging;
 use crate::models;
 use crate::sync::SyncState;
+use crate::toast::Toast;
 use crate::undo::UndoableAction;
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -127,8 +128,8 @@ pub struct UIState<'a> {
     pub remote_signature: Option<String>,
     pub sync_state: Arc<Mutex<SyncState>>,
     pub undo_stack: Vec<UndoableAction>,
-    pub status_message: Option<String>,
     pub debug_logging: bool,
+    pub toast: Option<Toast>,
 }
 
 impl<'a> Default for UIState<'a> {
@@ -148,8 +149,8 @@ impl<'a> Default for UIState<'a> {
             remote_signature: None,
             sync_state: Arc::new(Mutex::new(SyncState::default())),
             undo_stack: Vec::new(),
-            status_message: None,
             debug_logging: false,
+            toast: None,
         }
     }
 }
@@ -240,6 +241,11 @@ pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
     render_messages_panel(f, state, chunks[1]);
     render_details_panel(f, state, chunks[2]);
     render_compose_popup(f, state);
+
+    // Render toast if present
+    if let Some(ref toast) = state.toast {
+        f.render_widget(toast, f.area());
+    }
 }
 
 const DETAIL_SEPARATOR: &str = "------------------------------------------------------------";
@@ -344,11 +350,7 @@ fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
         })
         .collect();
 
-    let messages_title = if let Some(ref status) = state.status_message {
-        format!("Conversations - {}", status)
-    } else {
-        "Conversations".to_string()
-    };
+    let messages_title = "Conversations".to_string();
 
     let messages_block = Block::default()
         .borders(Borders::ALL)
