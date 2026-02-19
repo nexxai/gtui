@@ -29,6 +29,7 @@ struct TokenData {
     tokens: Vec<TokenInfo>,
 }
 
+#[derive(Clone, Copy)]
 pub struct RingStorage;
 
 impl RingStorage {
