@@ -3,7 +3,6 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,21 +21,7 @@ pub struct Toast {
     pub position: ToastPosition,
     pub style: Style,
     pub duration: Duration,
-    pub action: Option<Box<dyn FnMut()>>,
-    shown_at: RefCell<Option<Instant>>,
-}
-
-impl Default for Toast {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            position: ToastPosition::TopCenter,
-            style: Style::default().fg(Color::White).bg(Color::Black),
-            duration: Duration::from_secs(3),
-            action: None,
-            shown_at: RefCell::new(None),
-        }
-    }
+    shown_at: Instant,
 }
 
 impl Toast {
@@ -46,18 +31,17 @@ impl Toast {
             position,
             style: Style::default().fg(Color::White).bg(Color::Black),
             duration: Duration::from_secs(3),
-            action: None,
-            shown_at: RefCell::new(None),
+            shown_at: Instant::now(),
         }
     }
 
-    pub fn elapsed(&self) -> Option<Duration> {
-        self.shown_at.borrow().map(|t| t.elapsed())
+    pub fn is_expired(&self) -> bool {
+        self.shown_at.elapsed() >= self.duration
     }
 
     fn calculate_area(&self, area: Rect) -> Rect {
         let width = (area.width as f32 * 0.8).clamp(20.0, 60.0) as u16;
-        let height = 3; // Fixed height for toast
+        let height = 3;
 
         let x = match self.position {
             ToastPosition::TopLeft | ToastPosition::BottomLeft => 1,
@@ -92,17 +76,10 @@ impl ratatui::widgets::Widget for &Toast {
             return;
         }
 
-        // Set shown_at on first render
-        if self.shown_at.borrow().is_none() {
-            *self.shown_at.borrow_mut() = Some(Instant::now());
-        }
-
         let toast_area = self.calculate_area(area);
 
-        // Clear the area first
         Clear.render(toast_area, buf);
 
-        // Create the toast paragraph
         let paragraph = Paragraph::new(self.text.as_str())
             .style(self.style)
             .alignment(Alignment::Center)

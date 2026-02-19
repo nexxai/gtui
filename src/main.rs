@@ -961,9 +961,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Check toast timeout
         if let Some(toast) = &ui_state.toast
-            && toast.action.is_none()
-            && let Some(elapsed) = toast.elapsed()
-            && elapsed >= toast.duration
+            && toast.is_expired()
         {
             ui_state.toast = None;
         }
