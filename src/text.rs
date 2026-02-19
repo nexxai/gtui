@@ -1,56 +1,70 @@
+/// Convert basic HTML to plain text by stripping tags and decoding entities.
 pub fn convert_html_to_plain_text(html: &str) -> String {
-    let mut text = html.to_string();
+    // Replace block-level tags with newlines before stripping
+    let with_breaks = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n")
+        .replace("</div>", "\n")
+        .replace("</p>", "\n\n")
+        .replace("</li>", "\n");
 
-    // Replace line-breaking tags with newlines
-    text = text.replace("<br>", "\n");
-    text = text.replace("<br/>", "\n");
-    text = text.replace("<br />", "\n");
-    text = text.replace("</div>", "\n");
-    text = text.replace("</p>", "\n\n");
-    text = text.replace("</li>", "\n");
+    // Strip remaining HTML tags
+    let stripped = strip_tags(&with_breaks);
 
-    // Strip all other tags
-    let mut stripped = String::new();
+    // Decode common HTML entities
+    let decoded = decode_entities(&stripped);
+
+    // Collapse excessive blank lines
+    collapse_blank_lines(&decoded)
+}
+
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
-    for c in text.chars() {
-        if c == '<' {
-            in_tag = true;
-        } else if c == '>' {
-            in_tag = false;
-        } else if !in_tag {
-            stripped.push(c);
+
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
         }
     }
 
-    // Decode common HTML entities
-    let decoded = stripped
-        .replace("&nbsp;", " ")
+    out
+}
+
+fn decode_entities(text: &str) -> String {
+    text.replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;", "'");
+        .replace("&#39;", "'")
+}
 
-    // Clean up whitespace: collapse multiple newlines and trim
-    let mut final_text = String::new();
-    let mut last_was_newline = false;
+/// Collapse runs of blank/whitespace-only lines down to at most one blank line,
+/// and trim trailing whitespace from each line.
+fn collapse_blank_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_was_blank = true; // start true to skip leading blanks
 
-    for line in decoded.lines() {
+    for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            if !last_was_newline && !final_text.is_empty() {
-                final_text.push('\n');
-                last_was_newline = true;
+            if !prev_was_blank && !result.is_empty() {
+                result.push('\n');
+                prev_was_blank = true;
             }
         } else {
-            if last_was_newline && !final_text.is_empty() {
-                // final_text.push('\n'); // already pushed one above
+            if !result.is_empty() && !prev_was_blank {
+                result.push('\n');
             }
-            final_text.push_str(trimmed);
-            final_text.push('\n');
-            last_was_newline = false;
+            result.push_str(trimmed);
+            prev_was_blank = false;
         }
     }
 
-    final_text.trim().to_string()
+    result
 }
