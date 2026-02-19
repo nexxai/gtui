@@ -105,10 +105,10 @@ jobs:
             filename=$(basename "$dir"/gtui*)
             target=$(basename "$dir")
             if [[ "$target" == *"windows"* ]]; then
-              cp "$dir"/gtui.exe "release/gtui-${target}.exe"
+              cp "$dir"/gtui.exe "release/${target}.exe"
             else
-              cp "$dir/gtui" "release/gtui-${target}"
-              chmod +x "release/gtui-${target}"
+              cp "$dir/gtui" "release/${target}"
+              chmod +x "release/${target}"
             fi
           done
           ls -la release/
