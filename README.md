@@ -101,8 +101,6 @@ Your Name"""
 - **text.rs**: Formatting and rendering helpers.
 - **undo.rs**: Undo stack for destructive actions.
 
-```
-
 ## Features
 
 - **Thread Grouping**: Messages are grouped by thread ID in the list, showing
@@ -128,4 +126,3 @@ Your Name"""
   delete `gtui.db` and the app will re-sync on next startup.
 - **Keychain Access**: Ensure the app has permission to access the macOS Keychain
   if prompted.
-```
