@@ -46,20 +46,20 @@ sync_interval_seconds = 30
 
 ### Default Keybindings
 
-| Action                  | Keys                   |
-| :---------------------- | :--------------------- |
-| **Quit**                | `q`                    |
-| **Next Panel**          | `l`, `Right`, `Tab`    |
-| **Previous Panel**      | `h`, `Left`, `BackTab` |
-| **Move Up**             | `k`, `Up`              |
-| **Move Down**           | `j`, `Down`            |
-| **Mark as Read**        | `Space`                |
-| **New Message**         | `c`, `n`               |
-| **Reply**               | `r`                    |
-| **Forward**             | `f`                    |
-| **Delete**              | `d`                    |
-| **Archive**             | `Backspace`, `a`       |
-| **Send Message**        | `Cmd+Enter`, `Ctrl+S`  |
+| Action             | Keys                   |
+| :----------------- | :--------------------- |
+| **Quit**           | `q`                    |
+| **Next Panel**     | `l`, `Right`, `Tab`    |
+| **Previous Panel** | `h`, `Left`, `BackTab` |
+| **Move Up**        | `k`, `Up`              |
+| **Move Down**      | `j`, `Down`            |
+| **Mark as Read**   | `Space`                |
+| **New Message**    | `c`, `n`               |
+| **Reply**          | `r`                    |
+| **Forward**        | `f`                    |
+| **Delete**         | `d`                    |
+| **Archive**        | `Backspace`, `a`       |
+| **Send Message**   | `Cmd+Enter`, `Ctrl+S`  |
 
 ### Customizing Keybindings
 
@@ -86,6 +86,7 @@ reply = """
 
 Best,
 Your Name"""
+```
 
 ## Code Structure
 
@@ -99,6 +100,7 @@ Your Name"""
 - **ui.rs**: TUI layout and interaction.
 - **text.rs**: Formatting and rendering helpers.
 - **undo.rs**: Undo stack for destructive actions.
+
 ```
 
 ## Features
@@ -126,3 +128,4 @@ Your Name"""
   delete `gtui.db` and the app will re-sync on next startup.
 - **Keychain Access**: Ensure the app has permission to access the macOS Keychain
   if prompted.
+```
