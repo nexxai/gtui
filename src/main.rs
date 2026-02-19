@@ -27,17 +27,71 @@ use ratatui::crossterm::{
 use std::io;
 use std::sync::{Arc, Mutex};
 
+/// Shared application state passed to all key handlers.
+struct App {
+    config: Config,
+    db: db::Database,
+    db_url: String,
+    gmail_client: Option<GmailClient>,
+    sync_state: Arc<Mutex<sync::SyncState>>,
+    priority_tx: tokio::sync::mpsc::Sender<String>,
+    refresh_tx: tokio::sync::mpsc::Sender<()>,
+    current_offset: i64,
+    limit: i64,
+}
+
+impl App {
+    /// Get the currently-selected label ID, defaulting to INBOX.
+    fn current_label_id(&self, ui_state: &ui::UIState<'_>) -> String {
+        ui_state
+            .labels
+            .get(ui_state.selected_label_index)
+            .map(|l| l.id.clone())
+            .unwrap_or_else(|| "INBOX".to_string())
+    }
+
+    /// Select a new label, reload messages, and notify the sync task.
+    async fn select_label(
+        &mut self,
+        ui_state: &mut ui::UIState<'_>,
+        label_index: usize,
+    ) -> anyhow::Result<()> {
+        ui_state.selected_label_index = label_index;
+        let label_id = ui_state.labels[label_index].id.clone();
+        self.current_offset = 0;
+        ui_state.messages = self
+            .db
+            .get_messages_by_label(&label_id, self.limit, self.current_offset)
+            .await?;
+        ui_state.selected_message_index = 0;
+        ui_state.detail_scroll = 0;
+        ui_state.load_thread_for_selected(&self.db).await?;
+        let _ = self.priority_tx.try_send(label_id);
+        Ok(())
+    }
+
+    /// Remove the currently-selected message from the UI list and clamp the index.
+    fn remove_selected_message(&self, ui_state: &mut ui::UIState<'_>) {
+        ui_state.messages.remove(ui_state.selected_message_index);
+        if ui_state.selected_message_index >= ui_state.messages.len()
+            && !ui_state.messages.is_empty()
+        {
+            ui_state.selected_message_index = ui_state.messages.len() - 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Key handlers
+// ---------------------------------------------------------------------------
+
 async fn handle_navigation_keys(
     key: &KeyEvent,
-    config: &Config,
+    app: &mut App,
     ui_state: &mut ui::UIState<'_>,
-    db: &db::Database,
-    current_offset: &mut i64,
-    limit: i64,
-    priority_tx: &tokio::sync::mpsc::Sender<String>,
 ) -> anyhow::Result<bool> {
     // Panel switching
-    if matches_key(*key, &config.keybindings.prev_panel) {
+    if matches_key(*key, &app.config.keybindings.prev_panel) {
         ui_state.focused_panel = match ui_state.focused_panel {
             FocusedPanel::Details => FocusedPanel::Messages,
             FocusedPanel::Messages => FocusedPanel::Labels,
@@ -45,7 +99,7 @@ async fn handle_navigation_keys(
         };
         return Ok(true);
     }
-    if matches_key(*key, &config.keybindings.next_panel) {
+    if matches_key(*key, &app.config.keybindings.next_panel) {
         ui_state.focused_panel = match ui_state.focused_panel {
             FocusedPanel::Labels => FocusedPanel::Messages,
             FocusedPanel::Messages => FocusedPanel::Details,
@@ -55,20 +109,12 @@ async fn handle_navigation_keys(
     }
 
     // Navigation within panels
-    if matches_key(*key, &config.keybindings.move_down) {
+    if matches_key(*key, &app.config.keybindings.move_down) {
         match ui_state.focused_panel {
             FocusedPanel::Labels => {
-                if ui_state.selected_label_index < ui_state.labels.len().saturating_sub(1) {
-                    ui_state.selected_label_index += 1;
-                    let label_id = ui_state.labels[ui_state.selected_label_index].id.clone();
-                    *current_offset = 0;
-                    ui_state.messages = db
-                        .get_messages_by_label(&label_id, limit, *current_offset)
-                        .await?;
-                    ui_state.selected_message_index = 0;
-                    ui_state.detail_scroll = 0;
-                    ui_state.load_thread_for_selected(db).await?;
-                    let _ = priority_tx.try_send(label_id);
+                let next = ui_state.selected_label_index + 1;
+                if next < ui_state.labels.len() {
+                    app.select_label(ui_state, next).await?;
                 }
             }
             FocusedPanel::Messages => {
@@ -83,19 +129,26 @@ async fn handle_navigation_keys(
                             thread_id = ?msg.thread_id,
                             "navigating message list"
                         );
-                        ui_state.load_thread_for_selected(db).await?;
+                        ui_state.load_thread_for_selected(&app.db).await?;
                         tracing::debug!(
                             count = ui_state.threaded_messages.len(),
                             "loaded thread messages"
                         );
                     }
 
-                    if ui_state.selected_message_index >= ui_state.messages.len().saturating_sub(5)
+                    // Lazy-load more messages near the end
+                    if ui_state.selected_message_index
+                        >= ui_state.messages.len().saturating_sub(5)
                     {
-                        *current_offset += limit;
+                        app.current_offset += app.limit;
                         if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                            let mut additional = db
-                                .get_messages_by_label(&label.id, limit, *current_offset)
+                            let mut additional = app
+                                .db
+                                .get_messages_by_label(
+                                    &label.id,
+                                    app.limit,
+                                    app.current_offset,
+                                )
                                 .await?;
                             ui_state.messages.append(&mut additional);
                         }
@@ -109,27 +162,19 @@ async fn handle_navigation_keys(
         return Ok(true);
     }
 
-    if matches_key(*key, &config.keybindings.move_up) {
+    if matches_key(*key, &app.config.keybindings.move_up) {
         match ui_state.focused_panel {
             FocusedPanel::Labels => {
                 if ui_state.selected_label_index > 0 {
-                    ui_state.selected_label_index -= 1;
-                    let label_id = ui_state.labels[ui_state.selected_label_index].id.clone();
-                    *current_offset = 0;
-                    ui_state.messages = db
-                        .get_messages_by_label(&label_id, limit, *current_offset)
-                        .await?;
-                    ui_state.selected_message_index = 0;
-                    ui_state.detail_scroll = 0;
-                    ui_state.load_thread_for_selected(db).await?;
-                    let _ = priority_tx.try_send(label_id);
+                    let prev = ui_state.selected_label_index - 1;
+                    app.select_label(ui_state, prev).await?;
                 }
             }
             FocusedPanel::Messages => {
                 if ui_state.selected_message_index > 0 {
                     ui_state.selected_message_index -= 1;
                     ui_state.detail_scroll = 0;
-                    ui_state.load_thread_for_selected(db).await?;
+                    ui_state.load_thread_for_selected(&app.db).await?;
                 }
             }
             FocusedPanel::Details => {
@@ -144,23 +189,19 @@ async fn handle_navigation_keys(
 
 fn handle_message_actions(
     key: &KeyEvent,
-    config: &Config,
+    app: &App,
     ui_state: &mut ui::UIState<'_>,
-    gmail_client: &Option<GmailClient>,
-    db_url: &str,
 ) -> bool {
-    if matches_key(*key, &config.keybindings.mark_read) {
-        // Toggle Read/Unread
+    if matches_key(*key, &app.config.keybindings.mark_read) {
         if let Some(m) = ui_state.messages.get_mut(ui_state.selected_message_index) {
-            let is_currently_read = m.is_read;
-            m.is_read = !is_currently_read;
+            let new_status = !m.is_read;
+            m.is_read = new_status;
             let id = m.id.clone();
-            if let Some(gmail) = &gmail_client {
+            if let Some(gmail) = &app.gmail_client {
                 let gmail = gmail.clone();
-                let db_url_str = db_url.to_owned();
-                let new_status = !is_currently_read;
+                let db_url = app.db_url.clone();
                 tokio::spawn(async move {
-                    if let Ok(db_clone) = db::Database::new(&db_url_str).await {
+                    if let Ok(db_clone) = db::Database::new(&db_url).await {
                         if new_status {
                             let _ = gmail.mark_as_read(&id).await;
                         } else {
@@ -173,8 +214,7 @@ fn handle_message_actions(
         }
         return true;
     }
-    if matches_key(*key, &config.keybindings.reply) {
-        // Reply
+    if matches_key(*key, &app.config.keybindings.reply) {
         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
             let subject = m.subject.as_deref().unwrap_or("");
             let new_subject = if subject.to_lowercase().starts_with("re:") {
@@ -205,7 +245,7 @@ fn handle_message_actions(
             let sig_to_use = ui_state
                 .remote_signature
                 .as_ref()
-                .or(config.signatures.reply.as_ref());
+                .or(app.config.signatures.reply.as_ref());
             if let Some(sig) = sig_to_use {
                 signature_part.push_str("--\n");
                 signature_part.push_str(sig);
@@ -228,8 +268,7 @@ fn handle_message_actions(
         }
         return true;
     }
-    if matches_key(*key, &config.keybindings.forward) {
-        // Forward
+    if matches_key(*key, &app.config.keybindings.forward) {
         if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
             let subject = m.subject.as_deref().unwrap_or("");
             let new_subject = if subject.to_lowercase().starts_with("fwd:")
@@ -240,24 +279,19 @@ fn handle_message_actions(
                 format!("Fwd: {}", subject)
             };
 
-            // Build forwarded body
             let mut forward_body = String::new();
-
-            // Two blank lines at top for user's context
             forward_body.push_str("\n\n");
 
-            // Add signature (new_message signature for forwards)
             let sig_to_use = ui_state
                 .remote_signature
                 .as_ref()
-                .or(config.signatures.new_message.as_ref());
+                .or(app.config.signatures.new_message.as_ref());
             if let Some(sig) = sig_to_use {
                 forward_body.push_str("--\n");
                 forward_body.push_str(sig);
                 forward_body.push('\n');
             }
 
-            // Forwarding header block
             forward_body.push_str("\n---------- Forwarded message ----------\n");
             forward_body.push_str(&format!(
                 "From: {}\n",
@@ -278,7 +312,6 @@ fn handle_message_actions(
                 m.to_address.as_deref().unwrap_or("Unknown")
             ));
 
-            // Original message body
             let body_to_forward = m.body_plain.as_ref().or(m.snippet.as_ref());
             if let Some(body) = body_to_forward {
                 forward_body.push_str(&format!("\n{}", body));
@@ -286,20 +319,12 @@ fn handle_message_actions(
 
             ui_state.mode = ui::UIMode::Composing;
             let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
-            let compose = ui::ComposeState::new(
-                "", // Empty To field
-                "",
-                "",
-                &new_subject,
-                &forward_body,
-            );
-            // Cursor starts in To field (default)
+            let compose = ui::ComposeState::new("", "", "", &new_subject, &forward_body);
             ui_state.compose_state = Some(compose);
         }
         return true;
     }
-    if matches_key(*key, &config.keybindings.new_message) {
-        // New message
+    if matches_key(*key, &app.config.keybindings.new_message) {
         ui_state.mode = ui::UIMode::Composing;
         let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 
@@ -307,7 +332,7 @@ fn handle_message_actions(
         let sig_to_use = ui_state
             .remote_signature
             .as_ref()
-            .or(config.signatures.new_message.as_ref());
+            .or(app.config.signatures.new_message.as_ref());
         if let Some(sig) = sig_to_use {
             body.push_str("\n\n--\n");
             body.push_str(sig);
@@ -322,41 +347,28 @@ fn handle_message_actions(
 
 async fn handle_delete_action(
     key: &KeyEvent,
-    config: &Config,
+    app: &App,
     ui_state: &mut ui::UIState<'_>,
-    db: &db::Database,
-    gmail_client: &Option<GmailClient>,
-    sync_state_loop: &Arc<Mutex<sync::SyncState>>,
 ) -> anyhow::Result<bool> {
-    if !matches_key(*key, &config.keybindings.delete) {
+    if !matches_key(*key, &app.config.keybindings.delete) {
         return Ok(false);
     }
 
-    // Do nothing if labels panel is active
     if ui_state.focused_panel == FocusedPanel::Labels {
         return Ok(true);
     }
-    // Ensure conversations list is the active panel
     ui_state.focused_panel = FocusedPanel::Messages;
-    // Delete all messages in the thread
+
     if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
         let thread_id = m.thread_id.clone();
-
-        // Get all messages in the thread from the database
-        let thread_messages = db.get_messages_by_thread(&thread_id).await?;
+        let thread_messages = app.db.get_messages_by_thread(&thread_id).await?;
         let message_ids: Vec<String> = thread_messages.iter().map(|m| m.id.clone()).collect();
 
-        // Mark messages as recently modified to prevent sync from re-adding them
-        if let Ok(mut state) = sync_state_loop.lock() {
+        if let Ok(mut state) = app.sync_state.lock() {
             state.mark_modified_many(message_ids.clone());
         }
 
-        // Capture for undo BEFORE removing
-        let current_label_id = ui_state
-            .labels
-            .get(ui_state.selected_label_index)
-            .map(|l| l.id.clone())
-            .unwrap_or_else(|| "INBOX".to_string());
+        let current_label_id = app.current_label_id(ui_state);
         let original_index = ui_state.selected_message_index;
         ui_state.undo_stack.push(UndoableAction::Delete {
             messages: thread_messages.clone(),
@@ -364,9 +376,8 @@ async fn handle_delete_action(
             original_index,
         });
 
-        // Delete from database SYNCHRONOUSLY to ensure consistency
         for id in &message_ids {
-            if let Err(e) = db.delete_message(id).await {
+            if let Err(e) = app.db.delete_message(id).await {
                 ui_state.toast = Some(Toast::new(
                     format!("Failed to delete message from DB: {}", e),
                     ToastPosition::BottomRight,
@@ -374,9 +385,8 @@ async fn handle_delete_action(
             }
         }
 
-        // Call Gmail API and await result to ensure it succeeds
         let mut api_succeeded = true;
-        if let Some(gmail) = &gmail_client {
+        if let Some(gmail) = &app.gmail_client {
             tracing::debug!(count = message_ids.len(), "about to trash messages");
             match gmail.trash_messages(&message_ids).await {
                 Ok(_) => {
@@ -392,8 +402,8 @@ async fn handle_delete_action(
                         ToastPosition::BottomRight,
                     ));
                     api_succeeded = false;
-                    // Restore messages to database since API failed
-                    if let Err(e) = db
+                    if let Err(e) = app
+                        .db
                         .upsert_messages(&thread_messages, &current_label_id)
                         .await
                     {
@@ -402,8 +412,7 @@ async fn handle_delete_action(
                             ToastPosition::BottomRight,
                         ));
                     }
-                    // Remove from recently_modified since operation failed
-                    if let Ok(mut state) = sync_state_loop.lock() {
+                    if let Ok(mut state) = app.sync_state.lock() {
                         for id in &message_ids {
                             state.recently_modified.remove(id);
                         }
@@ -412,17 +421,9 @@ async fn handle_delete_action(
             }
         }
 
-        // Only update UI if API succeeded (or if no gmail client)
         if api_succeeded {
-            ui_state.messages.remove(ui_state.selected_message_index);
-            if ui_state.selected_message_index >= ui_state.messages.len()
-                && !ui_state.messages.is_empty()
-            {
-                ui_state.selected_message_index = ui_state.messages.len() - 1;
-            }
-
-            // Refresh detail view
-            ui_state.load_thread_for_selected(db).await?;
+            app.remove_selected_message(ui_state);
+            ui_state.load_thread_for_selected(&app.db).await?;
         }
     }
 
@@ -431,62 +432,42 @@ async fn handle_delete_action(
 
 async fn handle_archive_action(
     key: &KeyEvent,
-    config: &Config,
+    app: &App,
     ui_state: &mut ui::UIState<'_>,
-    db: &db::Database,
-    gmail_client: &Option<GmailClient>,
-    sync_state_loop: &Arc<Mutex<sync::SyncState>>,
 ) -> anyhow::Result<bool> {
-    if !matches_key(*key, &config.keybindings.archive) {
+    if !matches_key(*key, &app.config.keybindings.archive) {
         return Ok(false);
     }
 
-    // Do nothing if labels panel is active
     if ui_state.focused_panel == FocusedPanel::Labels {
         return Ok(true);
     }
-    // Ensure conversations list is the active panel
     ui_state.focused_panel = FocusedPanel::Messages;
-    // Archive all messages in the thread
+
     if let Some(m) = ui_state.messages.get(ui_state.selected_message_index) {
         let thread_id = m.thread_id.clone();
-
-        // Get all messages in the thread from the database
-        let thread_messages = db.get_messages_by_thread(&thread_id).await?;
+        let thread_messages = app.db.get_messages_by_thread(&thread_id).await?;
         let message_ids: Vec<String> = thread_messages.iter().map(|m| m.id.clone()).collect();
 
-        // Mark messages as recently modified to prevent sync from re-adding them
-        if let Ok(mut state) = sync_state_loop.lock() {
+        if let Ok(mut state) = app.sync_state.lock() {
             state.mark_modified_many(message_ids.clone());
         }
 
-        // Determine which labels to remove: INBOX plus the current label (if any)
-        let current_label_id = ui_state
-            .labels
-            .get(ui_state.selected_label_index)
-            .map(|l| l.id.clone())
-            .unwrap_or_else(|| "INBOX".to_string());
+        let current_label_id = app.current_label_id(ui_state);
 
         let mut label_ids_to_remove = vec!["INBOX".to_string()];
         if !label_ids_to_remove.contains(&current_label_id) {
-            label_ids_to_remove.push(current_label_id.clone());
+            label_ids_to_remove.push(current_label_id);
         }
 
         let protected_labels = ["DRAFT", "SENT"];
-        let mut removable_labels = Vec::new();
-        let mut skipped_labels = Vec::new();
-        for label_id in label_ids_to_remove {
-            if protected_labels.contains(&label_id.as_str()) {
-                skipped_labels.push(label_id);
-            } else {
-                removable_labels.push(label_id);
-            }
-        }
+        let (removable_labels, skipped_labels): (Vec<_>, Vec<_>) = label_ids_to_remove
+            .into_iter()
+            .partition(|id| !protected_labels.contains(&id.as_str()));
 
-        // Remove the label from database SYNCHRONOUSLY to ensure consistency
         for label_id in &removable_labels {
             for id in &message_ids {
-                if let Err(e) = db.remove_label_from_message(id, label_id).await {
+                if let Err(e) = app.db.remove_label_from_message(id, label_id).await {
                     ui_state.toast = Some(Toast::new(
                         format!("Failed to remove label from DB: {}", e),
                         ToastPosition::BottomRight,
@@ -495,9 +476,8 @@ async fn handle_archive_action(
             }
         }
 
-        // Call Gmail API and await result to ensure it succeeds
         let mut api_succeeded = true;
-        if let Some(gmail) = &gmail_client {
+        if let Some(gmail) = &app.gmail_client {
             let result = if removable_labels.is_empty() {
                 Ok(())
             } else if removable_labels.len() == 1 && removable_labels[0] == "INBOX" {
@@ -529,10 +509,9 @@ async fn handle_archive_action(
                         ToastPosition::BottomRight,
                     ));
                     api_succeeded = false;
-                    // Restore label since API failed
                     for label_id in &removable_labels {
                         for id in &message_ids {
-                            if let Err(e) = db.add_label_to_message(id, label_id).await {
+                            if let Err(e) = app.db.add_label_to_message(id, label_id).await {
                                 ui_state.toast = Some(Toast::new(
                                     format!("Error restoring {} label: {}", label_id, e),
                                     ToastPosition::BottomRight,
@@ -540,8 +519,7 @@ async fn handle_archive_action(
                             }
                         }
                     }
-                    // Remove from recently_modified since operation failed
-                    if let Ok(mut state) = sync_state_loop.lock() {
+                    if let Ok(mut state) = app.sync_state.lock() {
                         for id in &message_ids {
                             state.recently_modified.remove(id);
                         }
@@ -550,9 +528,7 @@ async fn handle_archive_action(
             }
         }
 
-        // Only update UI if API succeeded (or if no gmail client)
         if api_succeeded {
-            // Capture for undo BEFORE removing
             let original_index = ui_state.selected_message_index;
             ui_state.undo_stack.push(UndoableAction::Archive {
                 messages: thread_messages,
@@ -560,15 +536,8 @@ async fn handle_archive_action(
                 original_index,
             });
 
-            ui_state.messages.remove(ui_state.selected_message_index);
-            if ui_state.selected_message_index >= ui_state.messages.len()
-                && !ui_state.messages.is_empty()
-            {
-                ui_state.selected_message_index = ui_state.messages.len() - 1;
-            }
-
-            // Refresh detail view
-            ui_state.load_thread_for_selected(db).await?;
+            app.remove_selected_message(ui_state);
+            ui_state.load_thread_for_selected(&app.db).await?;
         }
     }
 
@@ -577,16 +546,13 @@ async fn handle_archive_action(
 
 async fn handle_undo_action(
     key: &KeyEvent,
-    config: &Config,
+    app: &App,
     ui_state: &mut ui::UIState<'_>,
-    db: &db::Database,
-    gmail_client: &Option<GmailClient>,
 ) -> anyhow::Result<bool> {
-    if !matches_key(*key, &config.keybindings.undo) {
+    if !matches_key(*key, &app.config.keybindings.undo) {
         return Ok(false);
     }
 
-    // Undo - only in Messages or Details panel
     if matches!(
         ui_state.focused_panel,
         FocusedPanel::Messages | FocusedPanel::Details
@@ -599,21 +565,16 @@ async fn handle_undo_action(
                 label_id,
                 original_index,
             } => {
-                // Get the representative message (first one) for UI insertion
                 let representative = messages.first().cloned().unwrap_or_default();
-
-                // Re-insert into UI at original position (clamped to list size)
                 let insert_index = (*original_index).min(ui_state.messages.len());
                 ui_state
                     .messages
                     .insert(insert_index, representative.clone());
                 ui_state.selected_message_index = insert_index;
 
-                // Re-insert all messages into database
-                let _ = db.upsert_messages(messages, label_id).await;
+                let _ = app.db.upsert_messages(messages, label_id).await;
 
-                // Untrash all messages via Gmail API
-                if let Some(gmail) = &gmail_client {
+                if let Some(gmail) = &app.gmail_client {
                     let gmail = gmail.clone();
                     let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
                     tokio::spawn(async move {
@@ -623,22 +584,19 @@ async fn handle_undo_action(
                     });
                 }
 
-                // Refresh detail view
-                ui_state.load_thread_for_selected(db).await?;
+                ui_state.load_thread_for_selected(&app.db).await?;
             }
             UndoableAction::Archive {
                 messages,
                 label_ids,
                 original_index,
             } => {
-                // Get the representative message (first one) for UI insertion
                 let representative = messages.first().cloned().unwrap_or_default();
-
-                // Re-insert into UI at original position (only if viewing the same label)
                 let current_label = ui_state
                     .labels
                     .get(ui_state.selected_label_index)
                     .map(|l| l.id.as_str());
+
                 if label_ids
                     .iter()
                     .any(|label_id| current_label == Some(label_id.as_str()))
@@ -650,27 +608,23 @@ async fn handle_undo_action(
                     ui_state.selected_message_index = insert_index;
                 }
 
-                // Re-add the removed label in database for all messages
                 for label_id in label_ids {
                     for message in messages {
-                        let _ = db.add_label_to_message(&message.id, label_id).await;
+                        let _ = app.db.add_label_to_message(&message.id, label_id).await;
                     }
                 }
 
-                // Restore label via Gmail API
-                if let Some(gmail) = &gmail_client {
+                if let Some(gmail) = &app.gmail_client {
                     let gmail = gmail.clone();
                     let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
                     let labels_to_restore = label_ids.clone();
                     tokio::spawn(async move {
                         for label_id in labels_to_restore {
                             if label_id == "INBOX" {
-                                // Use unarchive for INBOX
                                 for id in &ids {
                                     let _ = gmail.unarchive_message(id).await;
                                 }
                             } else {
-                                // Use add_label_to_message for other labels
                                 for id in &ids {
                                     let _ = gmail.add_label_to_message(id, &label_id).await;
                                 }
@@ -679,12 +633,11 @@ async fn handle_undo_action(
                     });
                 }
 
-                // Refresh detail view if message was re-added
                 if label_ids
                     .iter()
                     .any(|label_id| current_label == Some(label_id.as_str()))
                 {
-                    ui_state.load_thread_for_selected(db).await?;
+                    ui_state.load_thread_for_selected(&app.db).await?;
                 }
             }
         }
@@ -699,11 +652,8 @@ async fn handle_undo_action(
 
 fn handle_composing_keys(
     key: &KeyEvent,
-    config: &Config,
+    app: &App,
     ui_state: &mut ui::UIState<'_>,
-    gmail_client: &Option<GmailClient>,
-    db_url: &str,
-    refresh_tx: &tokio::sync::mpsc::Sender<()>,
 ) -> bool {
     match key.code {
         KeyCode::Esc => {
@@ -711,9 +661,9 @@ fn handle_composing_keys(
             let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Hide);
             ui_state.compose_state = None;
         }
-        _ if matches_key(*key, &config.keybindings.send_message) => {
+        _ if matches_key(*key, &app.config.keybindings.send_message) => {
             if let Some(cs) = &ui_state.compose_state
-                && let Some(gmail) = &gmail_client
+                && let Some(gmail) = &app.gmail_client
             {
                 let (to, cc, bcc, sub, body) = (
                     cs.get_to(),
@@ -723,21 +673,15 @@ fn handle_composing_keys(
                     cs.get_body(),
                 );
                 let gmail = gmail.clone();
-                let db_url_str = db_url.to_owned();
-                let refresh_tx_clone = refresh_tx.clone();
+                let db_url = app.db_url.clone();
+                let refresh_tx = app.refresh_tx.clone();
                 tokio::spawn(async move {
-                    // Send the message and get its ID
                     if let Ok(Some(msg_id)) = gmail.send_message(&to, &cc, &bcc, &sub, &body).await
+                        && let Ok(sent_msg) = gmail.get_message(&msg_id).await
+                        && let Ok(db_clone) = db::Database::new(&db_url).await
                     {
-                        // Fetch the sent message to get full details including thread_id
-                        if let Ok(sent_msg) = gmail.get_message(&msg_id).await {
-                            // Store in database with SENT label
-                            if let Ok(db_clone) = db::Database::new(&db_url_str).await {
-                                let _ = db_clone.upsert_messages(&[sent_msg], "SENT").await;
-                                // Trigger a refresh so the UI updates
-                                let _ = refresh_tx_clone.send(()).await;
-                            }
-                        }
+                        let _ = db_clone.upsert_messages(&[sent_msg], "SENT").await;
+                        let _ = refresh_tx.send(()).await;
                     }
                 });
             }
@@ -794,7 +738,6 @@ fn handle_composing_keys(
             {
                 cs.focused_textarea().input(*key);
             }
-            // Ignore Enter in single-line fields (to/cc/bcc/subject)
         }
         _ => {
             if let Some(cs) = &mut ui_state.compose_state {
@@ -805,6 +748,10 @@ fn handle_composing_keys(
 
     true
 }
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::print_stdout)]
 #[tokio::main]
@@ -824,7 +771,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Setup terminal early
+    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
@@ -837,11 +784,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mut ui_state = ui::UIState::default();
 
-    // Shared sync state for UI awareness
     let sync_state = Arc::new(Mutex::new(sync::SyncState::default()));
     ui_state.sync_state = sync_state.clone();
 
-    // Initial Auth setup
+    // Auth setup
     let secret = auth::load_secret("credentials.json").await?;
 
     use tokio::sync::mpsc;
@@ -860,15 +806,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mut app = App {
+        config,
+        db,
+        db_url,
+        gmail_client: None,
+        sync_state: sync_state.clone(),
+        priority_tx,
+        refresh_tx,
+        current_offset: 0,
+        limit: 50,
+    };
+
     let mut authenticated = false;
-    let mut current_offset: i64 = 0;
-    let limit: i64 = 50;
-
-    // We'll hold these in Options until authenticated
-    let mut gmail_client: Option<GmailClient> = None;
-
-    // Clone sync_state for use in the main loop
-    let sync_state_loop = sync_state.clone();
 
     loop {
         // Check for auth messages
@@ -882,7 +832,6 @@ async fn main() -> anyhow::Result<()> {
             ui_state.mode = ui::UIMode::Browsing;
             ui_state.auth_url = None;
 
-            // Now create the hub and client
             let hub = Gmail::new(
                 hyper::Client::builder().build(
                     hyper_rustls::HttpsConnectorBuilder::new()
@@ -896,17 +845,15 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let client = GmailClient::new(hub);
-            gmail_client = Some(client.clone());
+            app.gmail_client = Some(client.clone());
 
-            // Fetch remote signature
             if let Ok(Some(sig)) = client.get_signature().await {
                 ui_state.remote_signature = Some(sig);
             }
 
-            // Kick off sync
             let sync_client = client.clone();
-            let sync_db_url = db_url.clone();
-            let sync_refresh_tx = refresh_tx.clone();
+            let sync_db_url = app.db_url.clone();
+            let sync_refresh_tx = app.refresh_tx.clone();
             let sync_state_clone = sync_state.clone();
             let priority_rx = priority_rx.take().unwrap();
             sync::spawn_sync_task(
@@ -917,33 +864,34 @@ async fn main() -> anyhow::Result<()> {
                 priority_rx,
             );
 
-            // Load initial data for UI
-            ui_state.labels = db.get_labels().await?;
+            // Load initial data
+            ui_state.labels = app.db.get_labels().await?;
             if let Some(index) = ui_state.labels.iter().position(|l| l.id == "INBOX") {
                 ui_state.selected_label_index = index;
             }
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                ui_state.messages = db
-                    .get_messages_by_label(&label.id, limit, current_offset)
+                ui_state.messages = app
+                    .db
+                    .get_messages_by_label(&label.id, app.limit, app.current_offset)
                     .await?;
                 if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
-                    ui_state.threaded_messages = db.get_messages_by_thread(&msg.thread_id).await?;
+                    ui_state.threaded_messages =
+                        app.db.get_messages_by_thread(&msg.thread_id).await?;
                 }
             }
         }
 
-        // Check for sync refresh — drain all pending signals, then reload once
+        // Drain sync refresh signals, then reload once
         let mut needs_refresh = false;
         while let Ok(()) = refresh_rx.try_recv() {
             needs_refresh = true;
         }
         if needs_refresh {
             ui_state
-                .refresh_labels_and_messages(&db, limit, &mut current_offset)
+                .refresh_labels_and_messages(&app.db, app.limit, &mut app.current_offset)
                 .await?;
         }
 
-        // Check toast timeout
         if let Some(toast) = &ui_state.toast
             && toast.is_expired()
         {
@@ -957,7 +905,6 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Event::Key(key) = event::read()? {
-            // Only handle keys if authenticated or to quit
             if !authenticated && key.code != KeyCode::Char('q') {
                 continue;
             }
@@ -969,74 +916,31 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ui::UIMode::Browsing => {
-                    // Clear toast on any keypress (will be set again if action is pressed)
-                    if !matches_key(key, &config.keybindings.undo) {
+                    if !matches_key(key, &app.config.keybindings.undo) {
                         ui_state.toast = None;
                     }
-                    if matches_key(key, &config.keybindings.quit) {
+                    if matches_key(key, &app.config.keybindings.quit) {
                         break;
                     }
 
-                    let handled = handle_navigation_keys(
-                        &key,
-                        &config,
-                        &mut ui_state,
-                        &db,
-                        &mut current_offset,
-                        limit,
-                        &priority_tx,
-                    )
-                    .await?;
-                    if handled {
+                    if handle_navigation_keys(&key, &mut app, &mut ui_state).await? {
                         continue;
                     }
-                    if handle_message_actions(&key, &config, &mut ui_state, &gmail_client, &db_url)
-                    {
+                    if handle_message_actions(&key, &app, &mut ui_state) {
                         continue;
                     }
-
-                    if handle_delete_action(
-                        &key,
-                        &config,
-                        &mut ui_state,
-                        &db,
-                        &gmail_client,
-                        &sync_state_loop,
-                    )
-                    .await?
-                    {
+                    if handle_delete_action(&key, &app, &mut ui_state).await? {
                         continue;
                     }
-
-                    if handle_archive_action(
-                        &key,
-                        &config,
-                        &mut ui_state,
-                        &db,
-                        &gmail_client,
-                        &sync_state_loop,
-                    )
-                    .await?
-                    {
+                    if handle_archive_action(&key, &app, &mut ui_state).await? {
                         continue;
                     }
-
-                    let handled =
-                        handle_undo_action(&key, &config, &mut ui_state, &db, &gmail_client)
-                            .await?;
-                    if handled {
+                    if handle_undo_action(&key, &app, &mut ui_state).await? {
                         continue;
                     }
                 }
                 ui::UIMode::Composing => {
-                    let _ = handle_composing_keys(
-                        &key,
-                        &config,
-                        &mut ui_state,
-                        &gmail_client,
-                        &db_url,
-                        &refresh_tx,
-                    );
+                    handle_composing_keys(&key, &app, &mut ui_state);
                 }
             }
         }
