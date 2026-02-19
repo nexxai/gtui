@@ -16,14 +16,14 @@ use crate::toast::{Toast, ToastPosition};
 use crate::ui::FocusedPanel;
 use crate::undo::UndoableAction;
 use chrono::{DateTime, Local};
+use google_gmail1::Gmail;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use google_gmail1::Gmail;
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -372,7 +372,10 @@ async fn handle_delete_action(
         // Delete from database SYNCHRONOUSLY to ensure consistency
         for id in &message_ids {
             if let Err(e) = db.delete_message(id).await {
-                eprintln!("Error deleting message from DB: {}", e);
+                ui_state.toast = Some(Toast::new(
+                    format!("Failed to delete message from DB: {}", e),
+                    ToastPosition::BottomRight,
+                ));
             }
         }
 
@@ -381,18 +384,26 @@ async fn handle_delete_action(
         if let Some(gmail) = &gmail_client {
             match gmail.trash_messages(&message_ids).await {
                 Ok(_) => {
-                    ui_state.toast = Some(Toast::new("Deleted successfully", ToastPosition::BottomRight));
+                    ui_state.toast = Some(Toast::new(
+                        "Deleted successfully",
+                        ToastPosition::BottomRight,
+                    ));
                 }
                 Err(e) => {
-                    eprintln!("Error trashing messages: {}", e);
-                    ui_state.toast = Some(Toast::new(format!("Delete failed: {}", e), ToastPosition::BottomRight));
+                    ui_state.toast = Some(Toast::new(
+                        format!("Delete failed: {}", e),
+                        ToastPosition::BottomRight,
+                    ));
                     api_succeeded = false;
                     // Restore messages to database since API failed
                     if let Err(e) = db
                         .upsert_messages(&thread_messages, &current_label_id)
                         .await
                     {
-                        eprintln!("Error restoring messages to DB: {}", e);
+                        ui_state.toast = Some(Toast::new(
+                            format!("Failed to restore messages after delete failure: {}", e),
+                            ToastPosition::BottomRight,
+                        ));
                     }
                     // Remove from recently_modified since operation failed
                     if let Ok(mut state) = sync_state_loop.lock() {
@@ -479,7 +490,10 @@ async fn handle_archive_action(
         for label_id in &removable_labels {
             for id in &message_ids {
                 if let Err(e) = db.remove_label_from_message(id, label_id).await {
-                    eprintln!("Error removing {} label from DB: {}", label_id, e);
+                    ui_state.toast = Some(Toast::new(
+                        format!("Failed to remove label from DB: {}", e),
+                        ToastPosition::BottomRight,
+                    ));
                 }
             }
         }
@@ -500,21 +514,32 @@ async fn handle_archive_action(
             match result {
                 Ok(_) => {
                     if skipped_labels.is_empty() {
-                        ui_state.toast = Some(Toast::new("Archived successfully", ToastPosition::BottomRight));
+                        ui_state.toast = Some(Toast::new(
+                            "Archived successfully",
+                            ToastPosition::BottomRight,
+                        ));
                     } else {
                         let skipped_list = skipped_labels.join(", ");
-                        ui_state.toast = Some(Toast::new(format!("Archived (cannot remove label: {})", skipped_list), ToastPosition::BottomRight));
+                        ui_state.toast = Some(Toast::new(
+                            format!("Archived (cannot remove label: {})", skipped_list),
+                            ToastPosition::BottomRight,
+                        ));
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error archiving messages: {}", e);
-                    ui_state.toast = Some(Toast::new(format!("Archive failed: {}", e), ToastPosition::BottomRight));
+                    ui_state.toast = Some(Toast::new(
+                        format!("Archive failed: {}", e),
+                        ToastPosition::BottomRight,
+                    ));
                     api_succeeded = false;
                     // Restore label since API failed
                     for label_id in &removable_labels {
                         for id in &message_ids {
                             if let Err(e) = db.add_label_to_message(id, label_id).await {
-                                eprintln!("Error restoring {} label: {}", label_id, e);
+                                ui_state.toast = Some(Toast::new(
+                                    format!("Error restoring {} label: {}", label_id, e),
+                                    ToastPosition::BottomRight,
+                                ));
                             }
                         }
                     }
@@ -666,7 +691,10 @@ async fn handle_undo_action(
                     }
                 }
             }
-            ui_state.toast = Some(Toast::new(format!("Undone: {}", description), ToastPosition::BottomRight));
+            ui_state.toast = Some(Toast::new(
+                format!("Undone: {}", description),
+                ToastPosition::BottomRight,
+            ));
         }
     }
 
