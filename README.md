@@ -1,4 +1,6 @@
-# gtui - Rust Gmail TUI Client
+# gtui - Gmail TUI Client
+
+![gtui logo](assets/gtui-orig.png)
 
 A high-performance, terminal-based Gmail client built with Rust. Features secure
 OAuth2 authentication, local SQLite caching, background synchronization, and a
