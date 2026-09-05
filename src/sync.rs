@@ -67,7 +67,6 @@ pub struct SyncReport {
     pub processed_label_count: usize,
     pub processed_message_count: usize,
     pub error: Option<String>,
-    synced_label_ids: Vec<String>,
 }
 
 impl SyncReport {
@@ -78,14 +77,14 @@ impl SyncReport {
             processed_label_count: 0,
             processed_message_count: 0,
             error: None,
-            synced_label_ids: Vec::new(),
         }
     }
 
-    fn failed(mut self, error: &str) -> Self {
+    fn fail(&mut self, error: &str) {
         self.completion = SyncCompletion::Failed;
-        self.error = Some(error.to_string());
-        self
+        if self.error.is_none() {
+            self.error = Some(error.to_string());
+        }
     }
 }
 
@@ -115,52 +114,111 @@ pub(crate) trait SyncStore: Sync {
     async fn remove_label_from_message(&self, message_id: &str, label_id: &str) -> Result<()>;
 }
 
-async fn run_sync_cycle<M, S, F>(
-    sync_client: &M,
-    sync_db: &S,
-    priority_label: Option<&str>,
-    recently_modified: &HashSet<String>,
-    mut label_started: F,
-) -> SyncReport
+trait SyncObserver {
+    fn take_priority_label(&mut self) -> Option<String>;
+    fn label_started(&mut self, label_id: &str);
+    fn recently_modified_ids(&mut self, message_ids: &[String]) -> HashSet<String>;
+    fn label_finished(&mut self, label_id: &str, completion: SyncCompletion, changed: bool);
+}
+
+struct SchedulerObserver<'a> {
+    refresh_tx: &'a mpsc::Sender<()>,
+    sync_state: &'a Arc<Mutex<SyncState>>,
+    priority_rx: &'a mut mpsc::Receiver<String>,
+}
+
+impl SyncObserver for SchedulerObserver<'_> {
+    fn take_priority_label(&mut self) -> Option<String> {
+        drain_priority_label(self.priority_rx)
+    }
+
+    fn label_started(&mut self, label_id: &str) {
+        if let Ok(mut state) = self.sync_state.lock() {
+            state.currently_syncing = Some(label_id.to_string());
+        }
+    }
+
+    fn recently_modified_ids(&mut self, message_ids: &[String]) -> HashSet<String> {
+        self.sync_state
+            .lock()
+            .map(|mut state| {
+                state.cleanup_expired();
+                message_ids
+                    .iter()
+                    .filter(|id| state.is_recently_modified(id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn label_finished(&mut self, label_id: &str, completion: SyncCompletion, changed: bool) {
+        if let Ok(mut state) = self.sync_state.lock() {
+            if completion == SyncCompletion::Success {
+                state.synced_labels.insert(label_id.to_string());
+            }
+            state.currently_syncing = None;
+        }
+
+        if changed {
+            let _ = self.refresh_tx.try_send(());
+        }
+    }
+}
+
+async fn run_sync_cycle<M, S, O>(sync_client: &M, sync_db: &S, observer: &mut O) -> SyncReport
 where
     M: MailSource + ?Sized,
     S: SyncStore + ?Sized,
-    F: FnMut(&str),
+    O: SyncObserver + ?Sized,
 {
     let mut report = SyncReport::success();
     let labels = match sync_client.list_labels().await {
         Ok(labels) => labels,
-        Err(_) => return report.failed("failed to list Gmail labels"),
+        Err(_) => {
+            report.fail("failed to list Gmail labels");
+            return report;
+        }
     };
 
     if sync_db.upsert_labels(&labels).await.is_err() {
-        return report.failed("failed to store Gmail labels");
+        report.fail("failed to store Gmail labels");
+        return report;
     }
     report.changed = !labels.is_empty();
 
     let mut label_ids: Vec<String> = labels.into_iter().map(|label| label.id).collect();
 
-    if let Some(priority) = priority_label
-        && let Some(pos) = label_ids.iter().position(|id| id == priority)
+    if let Some(priority) = observer.take_priority_label()
+        && let Some(pos) = label_ids.iter().position(|id| id == &priority)
     {
         let priority = label_ids.remove(pos);
         label_ids.insert(0, priority);
     }
 
+    let mut catalog_changed = report.changed;
+
     for label_id in label_ids {
-        label_started(&label_id);
+        observer.label_started(&label_id);
+        let mut label_completion = SyncCompletion::Success;
+        let mut label_changed = std::mem::take(&mut catalog_changed);
 
         let (ids, next_page_token) = match sync_client
             .list_messages(std::slice::from_ref(&label_id), 100, None)
             .await
         {
             Ok(messages) => messages,
-            Err(_) => return report.failed("failed to list Gmail messages"),
+            Err(_) => {
+                report.fail("failed to list Gmail messages");
+                observer.label_finished(&label_id, SyncCompletion::Failed, label_changed);
+                continue;
+            }
         };
 
         let mut messages = Vec::new();
         let mut remote_ids = HashSet::new();
         let mut oldest_date = i64::MAX;
+        let recently_modified = observer.recently_modified_ids(&ids);
 
         for id in &ids {
             if recently_modified.contains(id) {
@@ -172,13 +230,21 @@ where
 
             let exists = match sync_db.message_exists(id).await {
                 Ok(exists) => exists,
-                Err(_) => return report.failed("failed to inspect stored message"),
+                Err(_) => {
+                    report.fail("failed to inspect stored message");
+                    label_completion = SyncCompletion::Failed;
+                    continue;
+                }
             };
 
             if !exists {
                 let message = match sync_client.get_message(id).await {
                     Ok(message) => message,
-                    Err(_) => return report.failed("failed to get Gmail message"),
+                    Err(_) => {
+                        report.fail("failed to get Gmail message");
+                        label_completion = SyncCompletion::Failed;
+                        continue;
+                    }
                 };
                 oldest_date = oldest_date.min(message.internal_date);
                 messages.push(message);
@@ -186,7 +252,11 @@ where
                 match sync_db.get_message_date(id).await {
                     Ok(Some(date)) => oldest_date = oldest_date.min(date),
                     Ok(None) => {}
-                    Err(_) => return report.failed("failed to inspect stored message date"),
+                    Err(_) => {
+                        report.fail("failed to inspect stored message date");
+                        label_completion = SyncCompletion::Failed;
+                        continue;
+                    }
                 }
             }
 
@@ -207,46 +277,60 @@ where
         );
 
         if sync_db.upsert_messages(&messages, &label_id).await.is_err() {
-            return report.failed("failed to store Gmail messages");
-        }
-        if !messages.is_empty() {
-            report.changed = true;
+            report.fail("failed to store Gmail messages");
+            label_completion = SyncCompletion::Failed;
+        } else if !messages.is_empty() {
+            label_changed = true;
         }
 
         // Detect removals (archived/deleted from other clients)
         if should_remove {
-            let local_info = match sync_db
+            match sync_db
                 .get_messages_with_dates_by_label(&label_id, 200)
                 .await
             {
-                Ok(local_info) => local_info,
-                Err(_) => return report.failed("failed to list stored messages"),
-            };
+                Ok(local_info) => {
+                    let local_ids = local_info
+                        .iter()
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>();
+                    let recently_modified_local = observer.recently_modified_ids(&local_ids);
 
-            for (local_id, local_date) in local_info {
-                if recently_modified.contains(&local_id) {
-                    continue;
-                }
+                    for (local_id, local_date) in local_info {
+                        if recently_modified_local.contains(&local_id) {
+                            continue;
+                        }
 
-                if local_date >= oldest_date && !remote_ids.contains(&local_id) {
-                    if sync_db
-                        .remove_label_from_message(&local_id, &label_id)
-                        .await
-                        .is_err()
-                    {
-                        return report.failed("failed to update stored message labels");
+                        if local_date >= oldest_date && !remote_ids.contains(&local_id) {
+                            if sync_db
+                                .remove_label_from_message(&local_id, &label_id)
+                                .await
+                                .is_err()
+                            {
+                                report.fail("failed to update stored message labels");
+                                label_completion = SyncCompletion::Failed;
+                                continue;
+                            }
+                            label_changed = true;
+                            debug!(
+                                local_id,
+                                label_id, oldest_date, "confirmed removal from label"
+                            );
+                        }
                     }
-                    report.changed = true;
-                    debug!(
-                        local_id,
-                        label_id, oldest_date, "confirmed removal from label"
-                    );
+                }
+                Err(_) => {
+                    report.fail("failed to list stored messages");
+                    label_completion = SyncCompletion::Failed;
                 }
             }
         }
 
-        report.processed_label_count += 1;
-        report.synced_label_ids.push(label_id);
+        if label_completion == SyncCompletion::Success {
+            report.processed_label_count += 1;
+        }
+        report.changed |= label_changed;
+        observer.label_finished(&label_id, label_completion, label_changed);
     }
 
     report
@@ -261,43 +345,14 @@ pub fn spawn_sync_task(
 ) {
     tokio::spawn(async move {
         let sync_interval_seconds = Config::load().sync_interval_seconds;
+        let mut observer = SchedulerObserver {
+            refresh_tx: &refresh_tx,
+            sync_state: &sync_state,
+            priority_rx: &mut priority_rx,
+        };
 
         loop {
-            let priority_label = drain_priority_label(&mut priority_rx);
-            let recently_modified = sync_state
-                .lock()
-                .map(|mut state| {
-                    state.cleanup_expired();
-                    state
-                        .recently_modified
-                        .keys()
-                        .filter(|id| state.is_recently_modified(id))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let report = run_sync_cycle(
-                &sync_client,
-                &sync_db,
-                priority_label.as_deref(),
-                &recently_modified,
-                |label_id| {
-                    if let Ok(mut state) = sync_state.lock() {
-                        state.currently_syncing = Some(label_id.to_string());
-                    }
-                },
-            )
-            .await;
-
-            if let Ok(mut state) = sync_state.lock() {
-                state.synced_labels.extend(report.synced_label_ids.clone());
-                state.currently_syncing = None;
-            }
-
-            if report.changed {
-                let _ = refresh_tx.send(()).await;
-            }
+            run_sync_cycle(&sync_client, &sync_db, &mut observer).await;
 
             tokio::time::sleep(Duration::from_secs(sync_interval_seconds)).await;
         }
@@ -313,11 +368,72 @@ mod tests {
     type MessageListResult = Result<(Vec<String>, Option<String>)>;
     type LocalMessagesResult = Result<Vec<(String, i64)>>;
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct LabelPublication {
+        label_id: String,
+        completion: SyncCompletion,
+        changed: bool,
+    }
+
+    #[derive(Default)]
+    struct ScriptedObserver {
+        priority_labels: VecDeque<String>,
+        priority_checks: usize,
+        recently_modified: HashSet<String>,
+        mark_after_recent_checks: VecDeque<Vec<String>>,
+        recent_checks: Vec<Vec<String>>,
+        started_labels: Vec<String>,
+        publications: Vec<LabelPublication>,
+    }
+
+    impl SyncObserver for ScriptedObserver {
+        fn take_priority_label(&mut self) -> Option<String> {
+            self.priority_checks += 1;
+            self.priority_labels.pop_front()
+        }
+
+        fn label_started(&mut self, label_id: &str) {
+            self.started_labels.push(label_id.to_string());
+        }
+
+        fn recently_modified_ids(&mut self, message_ids: &[String]) -> HashSet<String> {
+            self.recent_checks.push(message_ids.to_vec());
+            let recently_modified = message_ids
+                .iter()
+                .filter(|id| self.recently_modified.contains(*id))
+                .cloned()
+                .collect();
+
+            if let Some(ids) = self.mark_after_recent_checks.pop_front() {
+                self.recently_modified.extend(ids);
+            }
+
+            recently_modified
+        }
+
+        fn label_finished(&mut self, label_id: &str, completion: SyncCompletion, changed: bool) {
+            self.publications.push(LabelPublication {
+                label_id: label_id.to_string(),
+                completion,
+                changed,
+            });
+        }
+    }
+
+    fn publication(label_id: &str, completion: SyncCompletion, changed: bool) -> LabelPublication {
+        LabelPublication {
+            label_id: label_id.to_string(),
+            completion,
+            changed,
+        }
+    }
+
     #[derive(Default)]
     struct ScriptedMailSource {
         label_results: Mutex<VecDeque<Result<Vec<Label>>>>,
         message_list_results: Mutex<VecDeque<MessageListResult>>,
         message_results: Mutex<VecDeque<Result<Message>>>,
+        listed_label_ids: Mutex<Vec<Vec<String>>>,
         calls: Mutex<Vec<&'static str>>,
     }
 
@@ -330,11 +446,15 @@ mod tests {
 
         async fn list_messages(
             &self,
-            _label_ids: &[String],
+            label_ids: &[String],
             _max_results: u32,
             _page_token: Option<String>,
         ) -> Result<(Vec<String>, Option<String>)> {
             self.calls.lock().unwrap().push("list_messages");
+            self.listed_label_ids
+                .lock()
+                .unwrap()
+                .push(label_ids.to_vec());
             next_result(&self.message_list_results, "list_messages")
         }
 
@@ -452,14 +572,18 @@ mod tests {
             ..ScriptedSyncStore::default()
         };
 
-        let report = run_sync_cycle(&source, &store, None, &HashSet::new(), |_| {}).await;
+        let mut observer = ScriptedObserver::default();
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
 
         assert_eq!(report.completion, SyncCompletion::Success);
         assert!(report.changed);
         assert_eq!(report.processed_label_count, 1);
         assert_eq!(report.processed_message_count, 2);
         assert_eq!(report.error, None);
-        assert_eq!(report.synced_label_ids, ["INBOX"]);
+        assert_eq!(
+            observer.publications,
+            [publication("INBOX", SyncCompletion::Success, true)]
+        );
         assert_eq!(
             *source.calls.lock().unwrap(),
             ["list_labels", "list_messages", "get_message", "get_message"]
@@ -478,11 +602,15 @@ mod tests {
             ..ScriptedSyncStore::default()
         };
 
-        let report = run_sync_cycle(&source, &store, None, &HashSet::new(), |_| {}).await;
+        let mut observer = ScriptedObserver::default();
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
 
         assert_eq!(report.completion, SyncCompletion::Failed);
         assert_eq!(report.processed_label_count, 0);
-        assert!(report.synced_label_ids.is_empty());
+        assert_eq!(
+            observer.publications,
+            [publication("INBOX", SyncCompletion::Failed, true)]
+        );
         assert_eq!(
             report.error.as_deref(),
             Some("failed to list Gmail messages")
@@ -503,11 +631,15 @@ mod tests {
             ..ScriptedSyncStore::default()
         };
 
-        let report = run_sync_cycle(&source, &store, None, &HashSet::new(), |_| {}).await;
+        let mut observer = ScriptedObserver::default();
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
 
         assert_eq!(report.completion, SyncCompletion::Failed);
         assert_eq!(report.processed_label_count, 0);
-        assert!(report.synced_label_ids.is_empty());
+        assert_eq!(
+            observer.publications,
+            [publication("INBOX", SyncCompletion::Failed, true)]
+        );
         assert_eq!(
             report.error.as_deref(),
             Some("failed to store Gmail messages")
@@ -525,13 +657,224 @@ mod tests {
             ..ScriptedSyncStore::default()
         };
 
-        let report = run_sync_cycle(&source, &store, None, &HashSet::new(), |_| {}).await;
+        let mut observer = ScriptedObserver::default();
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
 
         assert_eq!(report.completion, SyncCompletion::Success);
         assert!(!report.changed);
         assert_eq!(report.processed_label_count, 0);
         assert_eq!(report.processed_message_count, 0);
+        assert!(observer.publications.is_empty());
         assert_eq!(*source.calls.lock().unwrap(), ["list_labels"]);
         assert_eq!(*store.calls.lock().unwrap(), ["upsert_labels"]);
+    }
+
+    #[tokio::test]
+    async fn cycle_continues_after_first_label_failure() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Ok(vec![label("FIRST"), label("SECOND")])])),
+            message_list_results: Mutex::new(VecDeque::from([
+                Err(anyhow!("first label detail")),
+                Ok((Vec::new(), None)),
+            ])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore {
+            label_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            ..ScriptedSyncStore::default()
+        };
+
+        let mut observer = ScriptedObserver::default();
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Failed);
+        assert_eq!(report.processed_label_count, 1);
+        assert_eq!(
+            observer.publications,
+            [
+                publication("FIRST", SyncCompletion::Failed, true),
+                publication("SECOND", SyncCompletion::Success, false),
+            ]
+        );
+        assert_eq!(
+            *source.calls.lock().unwrap(),
+            ["list_labels", "list_messages", "list_messages"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cycle_continues_after_message_failure_and_keeps_first_error() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Ok(vec![label("INBOX")])])),
+            message_list_results: Mutex::new(VecDeque::from([Ok((
+                vec!["message-1".to_string(), "message-2".to_string()],
+                None,
+            ))])),
+            message_results: Mutex::new(VecDeque::from([
+                Err(anyhow!("first message detail")),
+                Ok(message("message-2", 20)),
+            ])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore {
+            label_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_exists_results: Mutex::new(VecDeque::from([Ok(false), Ok(false)])),
+            local_message_results: Mutex::new(VecDeque::from([Err(anyhow!("later store detail"))])),
+            ..ScriptedSyncStore::default()
+        };
+        let mut observer = ScriptedObserver::default();
+
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Failed);
+        assert_eq!(report.processed_message_count, 1);
+        assert_eq!(report.error.as_deref(), Some("failed to get Gmail message"));
+        assert_eq!(
+            *source.calls.lock().unwrap(),
+            ["list_labels", "list_messages", "get_message", "get_message"]
+        );
+        assert_eq!(
+            observer.publications,
+            [publication("INBOX", SyncCompletion::Failed, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn cycle_scheduler_observer_publishes_completed_labels_and_refreshes() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Ok(vec![label("FIRST"), label("SECOND")])])),
+            message_list_results: Mutex::new(VecDeque::from([
+                Err(anyhow!("first label detail")),
+                Ok((vec!["message-2".to_string()], None)),
+            ])),
+            message_results: Mutex::new(VecDeque::from([Ok(message("message-2", 20))])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore {
+            label_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_exists_results: Mutex::new(VecDeque::from([Ok(false)])),
+            local_message_results: Mutex::new(VecDeque::from([Ok(Vec::new())])),
+            ..ScriptedSyncStore::default()
+        };
+        let sync_state = Arc::new(Mutex::new(SyncState::default()));
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(4);
+        let (_priority_tx, mut priority_rx) = mpsc::channel(1);
+        let mut observer = SchedulerObserver {
+            refresh_tx: &refresh_tx,
+            sync_state: &sync_state,
+            priority_rx: &mut priority_rx,
+        };
+
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Failed);
+        let state = sync_state.lock().unwrap();
+        assert_eq!(state.currently_syncing, None);
+        assert_eq!(state.synced_labels, HashSet::from(["SECOND".to_string()]));
+        drop(state);
+        assert_eq!(refresh_rx.try_recv(), Ok(()));
+        assert_eq!(refresh_rx.try_recv(), Ok(()));
+        assert!(refresh_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cycle_rechecks_recent_modifications_during_the_cycle() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Ok(vec![label("FIRST"), label("SECOND")])])),
+            message_list_results: Mutex::new(VecDeque::from([
+                Ok((vec!["message-1".to_string()], None)),
+                Ok((vec!["message-2".to_string()], None)),
+            ])),
+            message_results: Mutex::new(VecDeque::from([Ok(message("message-1", 10))])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore {
+            label_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_write_results: Mutex::new(VecDeque::from([Ok(()), Ok(())])),
+            message_exists_results: Mutex::new(VecDeque::from([Ok(false)])),
+            local_message_results: Mutex::new(VecDeque::from([Ok(Vec::new()), Ok(Vec::new())])),
+            ..ScriptedSyncStore::default()
+        };
+        let mut observer = ScriptedObserver {
+            mark_after_recent_checks: VecDeque::from([vec!["message-2".to_string()]]),
+            ..ScriptedObserver::default()
+        };
+
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Success);
+        assert_eq!(report.processed_label_count, 2);
+        assert_eq!(report.processed_message_count, 1);
+        assert_eq!(
+            *source.calls.lock().unwrap(),
+            [
+                "list_labels",
+                "list_messages",
+                "get_message",
+                "list_messages"
+            ]
+        );
+        assert_eq!(
+            observer.recent_checks,
+            [
+                vec!["message-1".to_string()],
+                Vec::new(),
+                vec!["message-2".to_string()],
+                Vec::new(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cycle_label_list_failure_preserves_priority() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Err(anyhow!("source detail"))])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore::default();
+        let mut observer = ScriptedObserver {
+            priority_labels: VecDeque::from(["INBOX".to_string()]),
+            ..ScriptedObserver::default()
+        };
+
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Failed);
+        assert_eq!(observer.priority_checks, 0);
+        assert_eq!(observer.priority_labels, ["INBOX"]);
+        assert!(observer.started_labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cycle_applies_priority_after_label_discovery() {
+        let source = ScriptedMailSource {
+            label_results: Mutex::new(VecDeque::from([Ok(vec![label("FIRST"), label("SECOND")])])),
+            message_list_results: Mutex::new(VecDeque::from([
+                Ok((Vec::new(), None)),
+                Ok((Vec::new(), None)),
+            ])),
+            ..ScriptedMailSource::default()
+        };
+        let store = ScriptedSyncStore {
+            label_write_results: Mutex::new(VecDeque::from([Ok(())])),
+            message_write_results: Mutex::new(VecDeque::from([Ok(()), Ok(())])),
+            ..ScriptedSyncStore::default()
+        };
+        let mut observer = ScriptedObserver {
+            priority_labels: VecDeque::from(["SECOND".to_string()]),
+            ..ScriptedObserver::default()
+        };
+
+        let report = run_sync_cycle(&source, &store, &mut observer).await;
+
+        assert_eq!(report.completion, SyncCompletion::Success);
+        assert_eq!(observer.started_labels, ["SECOND", "FIRST"]);
+        assert_eq!(
+            *source.listed_label_ids.lock().unwrap(),
+            [vec!["SECOND".to_string()], vec!["FIRST".to_string()]]
+        );
     }
 }
