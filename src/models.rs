@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProfile {
+    pub account_subject: String,
+    pub gmail_address: String,
+    pub history_id: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Label {
     pub id: String,

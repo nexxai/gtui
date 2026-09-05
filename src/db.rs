@@ -2,26 +2,43 @@ use crate::models;
 use crate::sync::SyncStore;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use fs2::FileExt;
 use inflections::case::to_title_case;
+use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sqlx::ConnectOptions;
+use sqlx::Connection;
 use sqlx::migrate::Migrate;
-use sqlx::sqlite::{SqliteConnection, SqlitePool};
-use sqlx::{ConnectOptions, Connection};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool};
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 const V0_SCHEMA: &str = include_str!("../tests/fixtures/schema-v0.sql");
+const LEGACY_DATABASE_NAME: &str = "gtui.db";
 
 type SchemaObject = (String, String, String, Option<String>);
 type LedgerRow = (i64, i64, Vec<u8>);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
     in_memory: bool,
+    _account_lease: Option<Arc<File>>,
+}
+
+#[derive(Debug)]
+pub struct AccountOpen {
+    pub database: Database,
+    pub legacy_quarantined: bool,
 }
 
 impl Database {
+    #[cfg(test)]
     pub async fn new(database_url: &str) -> Result<Self> {
-        use sqlx::sqlite::SqliteConnectOptions;
         use std::str::FromStr;
 
         let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
@@ -31,7 +48,91 @@ impl Database {
             .any(|(key, value)| key == "mode" && value == "memory");
 
         let pool = SqlitePool::connect_with(options).await?;
-        Ok(Self { pool, in_memory })
+        Ok(Self {
+            pool,
+            in_memory,
+            _account_lease: None,
+        })
+    }
+
+    pub async fn open_account(
+        directory: impl AsRef<Path>,
+        account_subject: &str,
+    ) -> Result<AccountOpen> {
+        validate_account_subject(account_subject)?;
+        let directory = directory.as_ref();
+        let database_path = account_database_path(directory, account_subject);
+        let lease = Arc::new(acquire_account_lease(&database_path)?);
+
+        if !database_path
+            .try_exists()
+            .context("failed to inspect account cache path")?
+        {
+            create_account_database(&database_path, account_subject, lease.clone()).await?;
+        }
+
+        let database = match Self::open_verified_account_database(
+            &database_path,
+            account_subject,
+            lease.clone(),
+        )
+        .await
+        {
+            Ok(database) => database,
+            Err(error) => {
+                quarantine_database(&database_path, "quarantine")
+                    .context("failed to quarantine invalid account cache")?;
+                return Err(error)
+                    .context("account cache identity verification failed; cache quarantined");
+            }
+        };
+        let legacy_quarantined =
+            handle_legacy_database(directory).context("failed to handle unowned legacy cache")?;
+
+        Ok(AccountOpen {
+            database,
+            legacy_quarantined,
+        })
+    }
+
+    async fn open_verified_account_database(
+        path: &Path,
+        account_subject: &str,
+        lease: Arc<File>,
+    ) -> Result<Self> {
+        inspect_account_identity(path, account_subject).await?;
+        let database = Self::connect_file(path, SqliteJournalMode::Wal, lease).await?;
+
+        if let Err(error) = database.run_migrations().await {
+            database.pool.close().await;
+            return Err(error);
+        }
+        if let Err(error) = verify_account_identity(&database.pool, account_subject).await {
+            database.pool.close().await;
+            return Err(error);
+        }
+
+        Ok(database)
+    }
+
+    async fn connect_file(
+        path: &Path,
+        journal_mode: SqliteJournalMode,
+        lease: Arc<File>,
+    ) -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .journal_mode(journal_mode);
+        let pool = SqlitePool::connect_with(options)
+            .await
+            .context("failed to open account cache")?;
+
+        Ok(Self {
+            pool,
+            in_memory: false,
+            _account_lease: Some(lease),
+        })
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
@@ -228,6 +329,263 @@ impl Database {
             .await?;
         Ok(())
     }
+}
+
+fn validate_account_subject(account_subject: &str) -> Result<()> {
+    if account_subject.is_empty() || account_subject.len() > 255 || !account_subject.is_ascii() {
+        bail!("verified account subject is invalid");
+    }
+    Ok(())
+}
+
+fn account_database_path(directory: &Path, account_subject: &str) -> PathBuf {
+    let account_key = format!("{:x}", Sha256::digest(account_subject.as_bytes()));
+    directory.join(format!("gtui-{account_key}.db"))
+}
+
+fn acquire_account_lease(database_path: &Path) -> Result<File> {
+    let lock_path = database_path.with_extension("lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lease = options
+        .open(lock_path)
+        .context("failed to open account cache lease")?;
+
+    if let Err(error) = FileExt::try_lock_exclusive(&lease) {
+        if error.kind() == ErrorKind::WouldBlock {
+            bail!("account already open; close the other gtui instance and retry");
+        }
+        return Err(error).context("failed to acquire account cache lease");
+    }
+
+    Ok(lease)
+}
+
+async fn create_account_database(
+    database_path: &Path,
+    account_subject: &str,
+    lease: Arc<File>,
+) -> Result<()> {
+    let directory = database_path
+        .parent()
+        .context("account cache path has no parent directory")?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".gtui-account-")
+        .suffix(".db.tmp")
+        .tempfile_in(directory)
+        .context("failed to create temporary account cache")?;
+    let database =
+        Database::connect_file(temporary.path(), SqliteJournalMode::Delete, lease).await?;
+
+    let initialization = async {
+        database.run_migrations().await?;
+        sqlx::query("INSERT INTO account_identity (singleton, account_subject) VALUES (1, ?)")
+            .bind(account_subject)
+            .execute(&database.pool)
+            .await
+            .context("failed to bind account cache identity")?;
+        verify_account_identity(&database.pool, account_subject).await
+    }
+    .await;
+    database.pool.close().await;
+    initialization?;
+
+    temporary
+        .as_file()
+        .sync_all()
+        .context("failed to sync temporary account cache")?;
+    match temporary.persist_noclobber(database_path) {
+        Ok(file) => {
+            file.sync_all()
+                .context("failed to sync installed account cache")?;
+            sync_parent(directory)?;
+        }
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+            drop(error.file);
+        }
+        Err(error) => return Err(error.error).context("failed to install account cache"),
+    }
+
+    Ok(())
+}
+
+async fn inspect_account_identity(path: &Path, account_subject: &str) -> Result<()> {
+    let options = SqliteConnectOptions::new().filename(path).read_only(true);
+    let mut connection = SqliteConnection::connect_with(&options)
+        .await
+        .context("failed to inspect account cache")?;
+    let verification = verify_account_identity_connection(&mut connection, account_subject).await;
+    let close = connection
+        .close()
+        .await
+        .context("failed to close account cache identity inspection");
+
+    verification?;
+    close
+}
+
+async fn verify_account_identity(pool: &SqlitePool, account_subject: &str) -> Result<()> {
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT singleton, account_subject FROM account_identity",
+    )
+    .fetch_all(pool)
+    .await
+    .context("account cache has no valid identity table")?;
+
+    verify_account_identity_rows(&rows, account_subject)
+}
+
+async fn verify_account_identity_connection(
+    connection: &mut SqliteConnection,
+    account_subject: &str,
+) -> Result<()> {
+    let rows = sqlx::query_as::<_, (i64, String)>(
+        "SELECT singleton, account_subject FROM account_identity",
+    )
+    .fetch_all(connection)
+    .await
+    .context("account cache has no valid identity table")?;
+
+    verify_account_identity_rows(&rows, account_subject)
+}
+
+fn verify_account_identity_rows(rows: &[(i64, String)], account_subject: &str) -> Result<()> {
+    if rows.len() != 1 || rows[0].0 != 1 || rows[0].1 != account_subject {
+        bail!("account cache identity does not match the authenticated account");
+    }
+    validate_account_subject(&rows[0].1)
+}
+
+fn handle_legacy_database(directory: &Path) -> Result<bool> {
+    let path = directory.join(LEGACY_DATABASE_NAME);
+    let artifacts = existing_database_artifacts(&path)?;
+    if artifacts.is_empty() {
+        return Ok(false);
+    }
+
+    let nonempty = artifacts.iter().try_fold(false, |nonempty, artifact| {
+        Ok::<_, std::io::Error>(nonempty || artifact.metadata()?.len() != 0)
+    })?;
+    if nonempty {
+        quarantine_database(&path, "unowned-backup")?;
+        return Ok(true);
+    }
+
+    for artifact in artifacts {
+        std::fs::remove_file(artifact).context("failed to remove empty legacy cache")?;
+    }
+    sync_parent(directory)?;
+    Ok(false)
+}
+
+fn quarantine_database(database_path: &Path, suffix: &str) -> Result<bool> {
+    let sources = existing_database_artifacts(database_path)?;
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let directory = database_path
+        .parent()
+        .context("cache path has no parent directory")?;
+
+    for attempt in 0_u64.. {
+        let destinations = sources
+            .iter()
+            .map(|source| quarantine_path(directory, source, attempt, suffix))
+            .collect::<Result<Vec<_>>>()?;
+        let mut linked = Vec::new();
+        let mut collision = false;
+
+        for (source, destination) in sources.iter().zip(&destinations) {
+            match std::fs::hard_link(source, destination) {
+                Ok(()) => linked.push(destination.clone()),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    collision = true;
+                    break;
+                }
+                Err(error) => {
+                    remove_links(&linked)?;
+                    return Err(error).context("failed to quarantine cache artifact");
+                }
+            }
+        }
+        if collision {
+            remove_links(&linked)?;
+            continue;
+        }
+
+        for destination in &destinations {
+            File::open(destination)?
+                .sync_all()
+                .context("failed to sync quarantined cache artifact")?;
+        }
+        for source in &sources {
+            std::fs::remove_file(source).context("failed to remove quarantined cache artifact")?;
+        }
+        sync_parent(directory)?;
+        return Ok(true);
+    }
+
+    unreachable!("unbounded quarantine suffix search exhausted")
+}
+
+fn existing_database_artifacts(database_path: &Path) -> Result<Vec<PathBuf>> {
+    database_artifacts(database_path)
+        .into_iter()
+        .filter_map(|path| match path.try_exists() {
+            Ok(true) => Some(Ok(path)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<std::io::Result<Vec<_>>>()
+        .context("failed to inspect cache artifacts")
+}
+
+fn database_artifacts(database_path: &Path) -> [PathBuf; 3] {
+    [
+        database_path.to_path_buf(),
+        sidecar_path(database_path, "-wal"),
+        sidecar_path(database_path, "-shm"),
+    ]
+}
+
+fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn quarantine_path(directory: &Path, source: &Path, attempt: u64, suffix: &str) -> Result<PathBuf> {
+    let mut name = OsString::from(
+        source
+            .file_name()
+            .context("cache artifact path has no file name")?,
+    );
+    name.push(format!(".{attempt}.{suffix}"));
+    Ok(directory.join(name))
+}
+
+fn remove_links(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        std::fs::remove_file(path).context("failed to clean partial cache quarantine")?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(directory: &Path) -> Result<()> {
+    File::open(directory)?
+        .sync_all()
+        .context("failed to sync cache directory")
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_directory: &Path) -> Result<()> {
+    Ok(())
 }
 
 async fn migrate_exclusively(connection: &mut SqliteConnection) -> Result<()> {
@@ -527,6 +885,223 @@ mod tests {
         Ok(())
     }
 
+    async fn close_account(open: AccountOpen) {
+        open.database.pool.close().await;
+    }
+
+    fn count_files_with_suffix(directory: &Path, suffix: &str) -> Result<usize> {
+        Ok(directory
+            .read_dir()?
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(suffix))
+            .count())
+    }
+
+    #[tokio::test]
+    async fn account_reopen_preserves_cache_and_other_account_is_isolated() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject_a = "stable-subject-a";
+        let subject_b = "stable-subject-b";
+        let first = Database::open_account(directory.path(), subject_a).await?;
+        sqlx::query("INSERT INTO labels (id, name, type) VALUES ('INBOX', 'Inbox', 'system')")
+            .execute(&first.database.pool)
+            .await?;
+        close_account(first).await;
+        let filename = account_database_path(directory.path(), subject_a)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let account_key = filename
+            .strip_prefix("gtui-")
+            .and_then(|name| name.strip_suffix(".db"))
+            .unwrap();
+        assert_eq!(account_key.len(), 64);
+        assert!(
+            account_key
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        );
+
+        let reopened = Database::open_account(directory.path(), subject_a).await?;
+        assert_eq!(reopened.database.get_labels().await?.len(), 1);
+        close_account(reopened).await;
+
+        let other = Database::open_account(directory.path(), subject_b).await?;
+        assert!(other.database.get_labels().await?.is_empty());
+        assert_ne!(
+            account_database_path(directory.path(), subject_a),
+            account_database_path(directory.path(), subject_b)
+        );
+        close_account(other).await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_filename_identity_mismatch_is_quarantined() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject_a = "stable-subject-a";
+        let subject_b = "stable-subject-b";
+        let first = Database::open_account(directory.path(), subject_a).await?;
+        close_account(first).await;
+        let path_a = account_database_path(directory.path(), subject_a);
+        let path_b = account_database_path(directory.path(), subject_b);
+        std::fs::rename(path_a, &path_b)?;
+
+        let error = Database::open_account(directory.path(), subject_b)
+            .await
+            .expect_err("mismatched identity was accepted");
+
+        assert!(error.to_string().contains("identity verification failed"));
+        assert!(!path_b.try_exists()?);
+        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_ownerless_database_is_quarantined_not_claimed() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject = "stable-subject-a";
+        let path = account_database_path(directory.path(), subject);
+        let ownerless = Database::new(&format!("sqlite://{}", path.display())).await?;
+        ownerless.run_migrations().await?;
+        ownerless.pool.close().await;
+
+        assert!(
+            Database::open_account(directory.path(), subject)
+                .await
+                .is_err()
+        );
+        assert!(!path.try_exists()?);
+        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_duplicate_identity_database_is_quarantined() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject = "stable-subject-a";
+        let path = account_database_path(directory.path(), subject);
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
+        sqlx::query("CREATE TABLE account_identity (singleton INTEGER, account_subject TEXT)")
+            .execute(&pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO account_identity VALUES (1, 'stable-subject-a'), (1, 'stable-subject-a')",
+        )
+        .execute(&pool)
+        .await?;
+        pool.close().await;
+
+        assert!(
+            Database::open_account(directory.path(), subject)
+                .await
+                .is_err()
+        );
+        assert!(!path.try_exists()?);
+        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_malformed_database_is_quarantined() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject = "stable-subject-a";
+        let path = account_database_path(directory.path(), subject);
+        std::fs::write(&path, b"fake malformed sqlite fixture")?;
+
+        assert!(
+            Database::open_account(directory.path(), subject)
+                .await
+                .is_err()
+        );
+        assert!(!path.try_exists()?);
+        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_malformed_schema_is_quarantined_after_owner_check() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject = "stable-subject-a";
+        let opened = Database::open_account(directory.path(), subject).await?;
+        close_account(opened).await;
+        let path = account_database_path(directory.path(), subject);
+        let pool = SqlitePool::connect_with(SqliteConnectOptions::new().filename(&path)).await?;
+        sqlx::query("DROP TRIGGER messages_ai")
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+
+        assert!(
+            Database::open_account(directory.path(), subject)
+                .await
+                .is_err()
+        );
+        assert!(!path.try_exists()?);
+        assert!(count_files_with_suffix(directory.path(), ".quarantine")? >= 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_legacy_nonempty_database_and_sidecars_are_backed_up() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let legacy = directory.path().join(LEGACY_DATABASE_NAME);
+        for artifact in database_artifacts(&legacy) {
+            std::fs::write(artifact, b"fake legacy cache fixture")?;
+        }
+        let existing_backup = directory.path().join("gtui.db.0.unowned-backup");
+        std::fs::write(&existing_backup, b"fake existing backup fixture")?;
+
+        let opened = Database::open_account(directory.path(), "stable-subject-a").await?;
+
+        assert!(opened.legacy_quarantined);
+        assert!(existing_database_artifacts(&legacy)?.is_empty());
+        assert_eq!(
+            std::fs::read(existing_backup)?,
+            b"fake existing backup fixture"
+        );
+        assert_eq!(
+            count_files_with_suffix(directory.path(), ".unowned-backup")?,
+            4
+        );
+        close_account(opened).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_legacy_empty_database_is_removed_after_account_creation() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let legacy = directory.path().join(LEGACY_DATABASE_NAME);
+        File::create(&legacy)?;
+
+        let opened = Database::open_account(directory.path(), "stable-subject-a").await?;
+
+        assert!(!opened.legacy_quarantined);
+        assert!(!legacy.try_exists()?);
+        assert!(account_database_path(directory.path(), "stable-subject-a").try_exists()?);
+        close_account(opened).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_lease_rejects_second_open() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let first = Database::open_account(directory.path(), "stable-subject-a").await?;
+
+        let error = Database::open_account(directory.path(), "stable-subject-a")
+            .await
+            .expect_err("second account lease was acquired");
+
+        assert!(error.to_string().contains("account already open"));
+        close_account(first).await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn migration_fresh_database_has_complete_schema_and_record() -> Result<()> {
         let (_directory, database) = temporary_database().await?;
@@ -538,7 +1113,9 @@ mod tests {
         let migrated_v0_objects = schema_objects(&database)
             .await?
             .into_iter()
-            .filter(|(_, _, table_name, _)| table_name != "_sqlx_migrations")
+            .filter(|(_, _, table_name, _)| {
+                table_name != "_sqlx_migrations" && table_name != "account_identity"
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             migrated_v0_objects,
@@ -548,6 +1125,7 @@ mod tests {
             object_names(&database, "table").await?,
             [
                 "_sqlx_migrations",
+                "account_identity",
                 "labels",
                 "message_labels",
                 "messages",
@@ -576,7 +1154,7 @@ mod tests {
             )
             .fetch_all(&database.pool)
             .await?,
-            [(1, true)]
+            [(1, true), (2, true)]
         );
 
         Ok(())
@@ -599,7 +1177,7 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
                 .fetch_one(&database.pool)
                 .await?,
-            1
+            2
         );
 
         Ok(())
@@ -618,7 +1196,7 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
                 .fetch_one(&database.pool)
                 .await?,
-            1
+            2
         );
 
         Ok(())
@@ -705,7 +1283,7 @@ mod tests {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
                 .fetch_one(&database.pool)
                 .await?,
-            1
+            2
         );
 
         Ok(())
@@ -726,7 +1304,7 @@ mod tests {
 
         database.run_migrations().await?;
 
-        assert_eq!(ledger_rows(&database).await?.len(), 1);
+        assert_eq!(ledger_rows(&database).await?.len(), 2);
 
         Ok(())
     }
@@ -804,7 +1382,7 @@ mod tests {
 
         database.run_migrations().await?;
 
-        assert_eq!(ledger_rows(&database).await?.len(), 1);
+        assert_eq!(ledger_rows(&database).await?.len(), 2);
 
         Ok(())
     }

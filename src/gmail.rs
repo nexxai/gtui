@@ -1,3 +1,6 @@
+use crate::auth::{
+    GMAIL_MODIFY_SCOPE, GMAIL_READONLY_SCOPE, GMAIL_SEND_SCOPE, GMAIL_SETTINGS_SCOPE,
+};
 use crate::models;
 use crate::sync::MailSource;
 use crate::text::convert_html_to_plain_text;
@@ -20,11 +23,25 @@ impl GmailClient {
         Self { hub }
     }
 
+    pub async fn account_profile(&self, account_subject: String) -> Result<models::AccountProfile> {
+        let (_, profile) = self
+            .hub
+            .users()
+            .get_profile("me")
+            .add_scope(GMAIL_READONLY_SCOPE)
+            .doit()
+            .await
+            .context("Failed to get Gmail profile")?;
+
+        account_profile(account_subject, profile)
+    }
+
     pub async fn get_signature(&self) -> Result<Option<String>> {
         let (_, aliases) = self
             .hub
             .users()
             .settings_send_as_list("me")
+            .add_scope(GMAIL_SETTINGS_SCOPE)
             .doit()
             .await
             .context("Failed to list send-as aliases")?;
@@ -43,6 +60,7 @@ impl GmailClient {
             .hub
             .users()
             .labels_list("me")
+            .add_scope(GMAIL_READONLY_SCOPE)
             .doit()
             .await
             .context("Failed to list labels")?;
@@ -74,6 +92,7 @@ impl GmailClient {
             .hub
             .users()
             .messages_list("me")
+            .add_scope(GMAIL_READONLY_SCOPE)
             .max_results(max_results);
 
         for label_id in label_ids {
@@ -101,6 +120,7 @@ impl GmailClient {
             .hub
             .users()
             .messages_get("me", id)
+            .add_scope(GMAIL_READONLY_SCOPE)
             .format("full")
             .doit()
             .await
@@ -196,6 +216,7 @@ impl GmailClient {
         self.hub
             .users()
             .messages_modify(req, "me", id)
+            .add_scope(GMAIL_MODIFY_SCOPE)
             .doit()
             .await
             .context("Failed to add label to message")?;
@@ -209,6 +230,7 @@ impl GmailClient {
         self.hub
             .users()
             .messages_untrash("me", id)
+            .add_scope(GMAIL_MODIFY_SCOPE)
             .doit()
             .await
             .context("Failed to untrash message")?;
@@ -249,6 +271,7 @@ impl GmailClient {
             .hub
             .users()
             .messages_send(google_gmail1::api::Message::default(), "me")
+            .add_scope(GMAIL_SEND_SCOPE)
             .upload(cursor, "message/rfc822".parse().unwrap())
             .await;
 
@@ -294,11 +317,34 @@ impl GmailClient {
         self.hub
             .users()
             .messages_batch_modify(req, "me")
+            .add_scope(GMAIL_MODIFY_SCOPE)
             .doit()
             .await?;
 
         Ok(())
     }
+}
+
+fn account_profile(
+    account_subject: String,
+    profile: google_gmail1::api::Profile,
+) -> Result<models::AccountProfile> {
+    if account_subject.is_empty() {
+        anyhow::bail!("Verified account subject is missing");
+    }
+    let gmail_address = profile
+        .email_address
+        .filter(|address| !address.trim().is_empty())
+        .context("Gmail profile address is missing")?;
+    let history_id = profile
+        .history_id
+        .context("Gmail profile history ID is missing")?;
+
+    Ok(models::AccountProfile {
+        account_subject,
+        gmail_address,
+        history_id,
+    })
 }
 
 #[async_trait]
@@ -422,6 +468,45 @@ mod tests {
                 "",
                 "",
                 "Hello\r\nBcc: attacker@example.com"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn account_profile_keeps_verified_subject_address_and_history() {
+        let profile = account_profile(
+            "subject-a".to_string(),
+            google_gmail1::api::Profile {
+                email_address: Some("person@example.test".to_string()),
+                history_id: Some(42),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(profile.account_subject, "subject-a");
+        assert_eq!(profile.gmail_address, "person@example.test");
+        assert_eq!(profile.history_id, 42);
+    }
+
+    #[test]
+    fn account_profile_rejects_missing_identity_fields() {
+        assert!(
+            account_profile(
+                "subject-a".to_string(),
+                google_gmail1::api::Profile::default()
+            )
+            .is_err()
+        );
+        assert!(
+            account_profile(
+                String::new(),
+                google_gmail1::api::Profile {
+                    email_address: Some("person@example.test".to_string()),
+                    history_id: Some(42),
+                    ..Default::default()
+                }
             )
             .is_err()
         );

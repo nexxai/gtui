@@ -27,6 +27,7 @@ use ratatui::crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Shared application state passed to all key handlers.
@@ -771,6 +772,14 @@ fn handle_composing_keys(key: &KeyEvent, app: &App, ui_state: &mut ui::UIState) 
 // Main
 // ---------------------------------------------------------------------------
 
+async fn open_verified_cache(
+    directory: &Path,
+    profile: anyhow::Result<models::AccountProfile>,
+) -> anyhow::Result<db::AccountOpen> {
+    let profile = profile?;
+    db::Database::open_account(directory, &profile.account_subject).await
+}
+
 #[allow(clippy::print_stdout)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -778,12 +787,8 @@ async fn main() -> anyhow::Result<()> {
     let debug_logging = std::env::args().any(|arg| arg == "--debug");
     logging::init(debug_logging)?;
 
-    let db = db::Database::new("sqlite:gtui.db?mode=rwc").await?;
-    db.run_migrations().await?;
-
-    // Handle token reset
     if std::env::args().any(|arg| arg == "--reset-token") {
-        auth::RingStorage.clear_token().await?;
+        auth::RingStorage::clear_token().await?;
         println!("Token cleared. Please restart without --reset-token to re-authenticate.");
         return Ok(());
     }
@@ -810,32 +815,27 @@ async fn main() -> anyhow::Result<()> {
 
     use tokio::sync::mpsc;
     let (tx, mut rx) = mpsc::channel::<String>(1);
-    let (done_tx, mut done_rx) = mpsc::channel::<bool>(1);
+    let (done_tx, mut done_rx) = mpsc::channel::<std::result::Result<String, &'static str>>(1);
     let (refresh_tx, mut refresh_rx) = mpsc::channel::<()>(1);
     let (priority_tx, priority_rx) = mpsc::channel::<String>(16);
     let mut priority_rx = Some(priority_rx);
 
-    let auth_builder = auth::authenticate(secret, auth::TuiDelegate { tx }).await?;
+    let (auth_builder, token_storage) =
+        auth::authenticate(secret, auth::TuiDelegate { tx }).await?;
 
     let auth_clone = auth_builder.clone();
     tokio::spawn(async move {
-        if auth_clone.token(auth::SCOPES).await.is_ok() {
-            let _ = done_tx.send(true).await;
-        }
+        let result = match auth_clone.token(auth::CANONICAL_SCOPES).await {
+            Ok(_) => token_storage
+                .account_subject()
+                .await
+                .map_err(|_| "Authentication did not establish a verified account"),
+            Err(_) => Err("Authentication failed"),
+        };
+        let _ = done_tx.send(result).await;
     });
 
-    let mut app = App {
-        config,
-        db,
-        gmail_client: None,
-        sync_state: sync_state.clone(),
-        priority_tx,
-        refresh_tx,
-        current_offset: 0,
-        limit: 50,
-        has_more_messages: false,
-    };
-
+    let mut app = None;
     let mut authenticated = false;
 
     loop {
@@ -845,10 +845,8 @@ async fn main() -> anyhow::Result<()> {
             ui_state.mode = ui::UIMode::Authentication;
         }
 
-        if !authenticated && let Ok(true) = done_rx.try_recv() {
-            authenticated = true;
-            ui_state.mode = ui::UIMode::Browsing;
-            ui_state.auth_url = None;
+        if !authenticated && let Ok(result) = done_rx.try_recv() {
+            let account_subject = result.map_err(anyhow::Error::msg)?;
 
             let hub = Gmail::new(
                 hyper::Client::builder().build(
@@ -863,15 +861,37 @@ async fn main() -> anyhow::Result<()> {
             );
 
             let client = GmailClient::new(hub);
-            app.gmail_client = Some(client.clone());
+            let opened = open_verified_cache(
+                Path::new("."),
+                client.account_profile(account_subject).await,
+            )
+            .await?;
+            let mut new_app = App {
+                config: config.clone(),
+                db: opened.database,
+                gmail_client: Some(client.clone()),
+                sync_state: sync_state.clone(),
+                priority_tx: priority_tx.clone(),
+                refresh_tx: refresh_tx.clone(),
+                current_offset: 0,
+                limit: 50,
+                has_more_messages: false,
+            };
+
+            if opened.legacy_quarantined {
+                ui_state.toast = Some(Toast::new(
+                    "An unowned legacy cache was backed up; mail will be resynced",
+                    ToastPosition::BottomRight,
+                ));
+            }
 
             if let Ok(Some(sig)) = client.get_signature().await {
                 ui_state.remote_signature = Some(sig);
             }
 
             let sync_client = client.clone();
-            let sync_db = app.db.clone();
-            let sync_refresh_tx = app.refresh_tx.clone();
+            let sync_db = new_app.db.clone();
+            let sync_refresh_tx = new_app.refresh_tx.clone();
             let sync_state_clone = sync_state.clone();
             let priority_rx = priority_rx
                 .take()
@@ -885,22 +905,26 @@ async fn main() -> anyhow::Result<()> {
             );
 
             // Load initial data
-            ui_state.labels = app.db.get_labels().await?;
+            ui_state.labels = new_app.db.get_labels().await?;
             if let Some(index) = ui_state.labels.iter().position(|l| l.id == "INBOX") {
                 ui_state.selected_label_index = index;
             }
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                let messages = app
+                let messages = new_app
                     .db
-                    .get_messages_by_label(&label.id, app.limit, app.current_offset)
+                    .get_messages_by_label(&label.id, new_app.limit, new_app.current_offset)
                     .await?;
-                app.has_more_messages = messages.len() == app.limit as usize;
+                new_app.has_more_messages = messages.len() == new_app.limit as usize;
                 ui_state.messages = messages;
                 if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
                     ui_state.threaded_messages =
-                        app.db.get_messages_by_thread(&msg.thread_id).await?;
+                        new_app.db.get_messages_by_thread(&msg.thread_id).await?;
                 }
             }
+            app = Some(new_app);
+            authenticated = true;
+            ui_state.mode = ui::UIMode::Browsing;
+            ui_state.auth_url = None;
         }
 
         // Drain sync refresh signals, then reload once
@@ -908,7 +932,7 @@ async fn main() -> anyhow::Result<()> {
         while let Ok(()) = refresh_rx.try_recv() {
             needs_refresh = true;
         }
-        if needs_refresh {
+        if needs_refresh && let Some(app) = app.as_mut() {
             ui_state
                 .refresh_labels_and_messages(&app.db, app.limit, &mut app.current_offset)
                 .await?;
@@ -928,7 +952,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if let Event::Key(key) = event::read()? {
-            if !authenticated && key.code != KeyCode::Char('q') {
+            if !authenticated {
+                if key.code == KeyCode::Char('q') {
+                    break;
+                }
                 continue;
             }
 
@@ -939,6 +966,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 ui::UIMode::Browsing => {
+                    let app = app
+                        .as_mut()
+                        .context("authenticated application state is unavailable")?;
                     if !matches_key(key, &app.config.keybindings.undo) {
                         ui_state.toast = None;
                     }
@@ -946,28 +976,50 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
 
-                    if handle_navigation_keys(&key, &mut app, &mut ui_state).await? {
+                    if handle_navigation_keys(&key, app, &mut ui_state).await? {
                         continue;
                     }
-                    if handle_message_actions(&key, &app, &mut ui_state) {
+                    if handle_message_actions(&key, app, &mut ui_state) {
                         continue;
                     }
-                    if handle_delete_action(&key, &app, &mut ui_state).await? {
+                    if handle_delete_action(&key, app, &mut ui_state).await? {
                         continue;
                     }
-                    if handle_archive_action(&key, &app, &mut ui_state).await? {
+                    if handle_archive_action(&key, app, &mut ui_state).await? {
                         continue;
                     }
-                    if handle_undo_action(&key, &app, &mut ui_state).await? {
+                    if handle_undo_action(&key, app, &mut ui_state).await? {
                         continue;
                     }
                 }
                 ui::UIMode::Composing => {
-                    handle_composing_keys(&key, &app, &mut ui_state);
+                    let app = app
+                        .as_ref()
+                        .context("authenticated application state is unavailable")?;
+                    handle_composing_keys(&key, app, &mut ui_state);
                 }
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_profile_failure_leaves_cache_inaccessible_and_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let result = open_verified_cache(
+            directory.path(),
+            Err(anyhow::anyhow!("fake profile failure")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(directory.path().read_dir().unwrap().next().is_none());
+    }
 }
