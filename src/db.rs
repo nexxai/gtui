@@ -1,5 +1,7 @@
 use crate::models;
+use crate::sync::SyncStore;
 use anyhow::Result;
+use async_trait::async_trait;
 use inflections::case::to_title_case;
 use sqlx::sqlite::SqlitePool;
 
@@ -191,5 +193,36 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SyncStore for Database {
+    async fn upsert_labels(&self, labels: &[models::Label]) -> Result<()> {
+        Database::upsert_labels(self, labels).await
+    }
+
+    async fn upsert_messages(&self, messages: &[models::Message], label_id: &str) -> Result<()> {
+        Database::upsert_messages(self, messages, label_id).await
+    }
+
+    async fn message_exists(&self, id: &str) -> Result<bool> {
+        Database::message_exists(self, id).await
+    }
+
+    async fn get_message_date(&self, id: &str) -> Result<Option<i64>> {
+        Database::get_message_date(self, id).await
+    }
+
+    async fn get_messages_with_dates_by_label(
+        &self,
+        label_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, i64)>> {
+        Database::get_messages_with_dates_by_label(self, label_id, limit).await
+    }
+
+    async fn remove_label_from_message(&self, message_id: &str, label_id: &str) -> Result<()> {
+        Database::remove_label_from_message(self, message_id, label_id).await
     }
 }

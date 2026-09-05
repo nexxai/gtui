@@ -460,7 +460,7 @@ fn render_details_panel(f: &mut Frame, state: &UIState, area: Rect) {
                 "From: {}\nDate: {}\n\n{}\n",
                 sender,
                 time_str,
-                &clean_body(
+                clean_body(
                     msg.body_plain
                         .as_deref()
                         .unwrap_or_else(|| msg.snippet.as_deref().unwrap_or(""))

@@ -1,6 +1,8 @@
 use crate::models;
+use crate::sync::MailSource;
 use crate::text::convert_html_to_plain_text;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use google_gmail1::Gmail;
 use hyper::client::HttpConnector;
@@ -296,6 +298,26 @@ impl GmailClient {
             .await?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl MailSource for GmailClient {
+    async fn list_labels(&self) -> Result<Vec<models::Label>> {
+        GmailClient::list_labels(self).await
+    }
+
+    async fn list_messages(
+        &self,
+        label_ids: &[String],
+        max_results: u32,
+        page_token: Option<String>,
+    ) -> Result<(Vec<String>, Option<String>)> {
+        GmailClient::list_messages(self, label_ids, max_results, page_token).await
+    }
+
+    async fn get_message(&self, id: &str) -> Result<models::Message> {
+        GmailClient::get_message(self, id).await
     }
 }
 
