@@ -62,3 +62,6 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
   INSERT INTO messages_fts(rowid, subject, from_address, snippet, body_plain)
   VALUES (new.rowid, new.subject, new.from_address, new.snippet, new.body_plain);
 END;
+
+-- Populate or repair the external-content FTS index when adopting v0.
+INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
