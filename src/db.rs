@@ -3,9 +3,9 @@ use crate::sync::SyncStore;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use inflections::case::to_title_case;
-use sqlx::Connection;
 use sqlx::migrate::Migrate;
 use sqlx::sqlite::{SqliteConnection, SqlitePool};
+use sqlx::{ConnectOptions, Connection};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 const V0_SCHEMA: &str = include_str!("../tests/fixtures/schema-v0.sql");
@@ -16,6 +16,7 @@ type LedgerRow = (i64, i64, Vec<u8>);
 #[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
+    in_memory: bool,
 }
 
 impl Database {
@@ -24,12 +25,26 @@ impl Database {
         use std::str::FromStr;
 
         let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
+        let in_memory = options
+            .to_url_lossy()
+            .query_pairs()
+            .any(|(key, value)| key == "mode" && value == "memory");
 
         let pool = SqlitePool::connect_with(options).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, in_memory })
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
+        let _in_memory_anchor = if self.in_memory {
+            Some(
+                self.pool
+                    .acquire()
+                    .await
+                    .context("failed to retain in-memory database during migration")?,
+            )
+        } else {
+            None
+        };
         let mut connection = self
             .pool
             .acquire()
@@ -562,6 +577,29 @@ mod tests {
             .fetch_all(&database.pool)
             .await?,
             [(1, true)]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_in_memory_database_remains_available() -> Result<()> {
+        let database = Database::new("sqlite::memory:").await?;
+
+        database.run_migrations().await?;
+
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'messages')"
+            )
+            .fetch_one(&database.pool)
+            .await?
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(&database.pool)
+                .await?,
+            1
         );
 
         Ok(())
