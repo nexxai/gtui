@@ -1,9 +1,14 @@
 use crate::models;
 use crate::sync::SyncStore;
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use inflections::case::to_title_case;
-use sqlx::sqlite::SqlitePool;
+use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+const V0_SCHEMA: &str = include_str!("../tests/fixtures/schema-v0.sql");
+
+type SchemaObject = (String, String, String, Option<String>);
 
 #[derive(Clone)]
 pub struct Database {
@@ -22,8 +27,49 @@ impl Database {
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
-        let schema = include_str!("../schema.sql");
-        sqlx::query(schema).execute(&self.pool).await?;
+        let is_versioned = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = '_sqlx_migrations'
+            )",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to inspect database migration state")?;
+
+        if !is_versioned {
+            self.verify_unversioned_schema().await?;
+        }
+
+        MIGRATOR
+            .run(&self.pool)
+            .await
+            .context("failed to run database migrations")?;
+        Ok(())
+    }
+
+    async fn verify_unversioned_schema(&self) -> Result<()> {
+        let actual = schema_objects(&self.pool).await?;
+        if actual.is_empty() {
+            return Ok(());
+        }
+
+        let expected_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .context("failed to prepare known v0 schema")?;
+        sqlx::query(V0_SCHEMA)
+            .execute(&expected_pool)
+            .await
+            .context("failed to prepare known v0 schema")?;
+
+        if actual != schema_objects(&expected_pool).await? {
+            bail!(
+                "unsupported unversioned schema: expected an empty database or the exact gtui v0 schema; back up the cache and restore a compatible schema or remove it to re-sync"
+            );
+        }
+
         Ok(())
     }
 
@@ -196,6 +242,25 @@ impl Database {
     }
 }
 
+async fn schema_objects(pool: &SqlitePool) -> Result<Vec<SchemaObject>> {
+    let objects = sqlx::query_as::<_, SchemaObject>(
+        "SELECT type, name, tbl_name, sql
+         FROM sqlite_schema
+         ORDER BY type, name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to inspect unversioned database schema")?;
+
+    Ok(objects
+        .into_iter()
+        .map(|(object_type, name, table_name, sql)| {
+            let sql = sql.map(|sql| sql.split_whitespace().collect::<Vec<_>>().join(" "));
+            (object_type, name, table_name, sql)
+        })
+        .collect())
+}
+
 #[async_trait]
 impl SyncStore for Database {
     async fn upsert_labels(&self, labels: &[models::Label]) -> Result<()> {
@@ -224,5 +289,279 @@ impl SyncStore for Database {
 
     async fn remove_label_from_message(&self, message_id: &str, label_id: &str) -> Result<()> {
         Database::remove_label_from_message(self, message_id, label_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn temporary_database() -> Result<(TempDir, Database)> {
+        let directory = tempfile::tempdir()?;
+        let database_path = directory.path().join("gtui.db");
+        let database_url = format!("sqlite://{}", database_path.display());
+        let database = Database::new(&database_url).await?;
+
+        Ok((directory, database))
+    }
+
+    async fn initialize_v0(database: &Database) -> Result<()> {
+        sqlx::query(V0_SCHEMA).execute(&database.pool).await?;
+        Ok(())
+    }
+
+    async fn schema_objects(database: &Database) -> Result<Vec<SchemaObject>> {
+        super::schema_objects(&database.pool).await
+    }
+
+    async fn object_names(database: &Database, object_type: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT name
+             FROM sqlite_schema
+             WHERE type = ? AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .bind(object_type)
+        .fetch_all(&database.pool)
+        .await?)
+    }
+
+    async fn assert_unsupported_schema(database: &Database) -> Result<()> {
+        let before = schema_objects(database).await?;
+        let error = database
+            .run_migrations()
+            .await
+            .expect_err("schema accepted");
+
+        assert!(
+            error.to_string().contains("unsupported unversioned schema"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(schema_objects(database).await?, before);
+        assert!(
+            !object_names(database, "table")
+                .await?
+                .contains(&"_sqlx_migrations".to_string())
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_fresh_database_has_complete_schema_and_record() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        let (_fixture_directory, fixture_database) = temporary_database().await?;
+        initialize_v0(&fixture_database).await?;
+
+        database.run_migrations().await?;
+
+        let migrated_v0_objects = schema_objects(&database)
+            .await?
+            .into_iter()
+            .filter(|(_, _, table_name, _)| table_name != "_sqlx_migrations")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            migrated_v0_objects,
+            schema_objects(&fixture_database).await?
+        );
+        assert_eq!(
+            object_names(&database, "table").await?,
+            [
+                "_sqlx_migrations",
+                "labels",
+                "message_labels",
+                "messages",
+                "messages_fts",
+                "messages_fts_config",
+                "messages_fts_data",
+                "messages_fts_docsize",
+                "messages_fts_idx",
+            ]
+        );
+        assert_eq!(
+            object_names(&database, "index").await?,
+            [
+                "idx_message_labels_label_id",
+                "idx_messages_internal_date",
+                "idx_messages_thread_id",
+            ]
+        );
+        assert_eq!(
+            object_names(&database, "trigger").await?,
+            ["messages_ad", "messages_ai", "messages_au"]
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (i64, bool)>(
+                "SELECT version, success FROM _sqlx_migrations ORDER BY version"
+            )
+            .fetch_all(&database.pool)
+            .await?,
+            [(1, true)]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_second_run_is_idempotent() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        database.run_migrations().await?;
+        let first_schema = schema_objects(&database).await?;
+
+        database.run_migrations().await?;
+
+        assert_eq!(schema_objects(&database).await?, first_schema);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(&database.pool)
+                .await?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_preserves_v0_data_and_fts_behavior() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        initialize_v0(&database).await?;
+        sqlx::query("INSERT INTO labels (id, name, type) VALUES ('INBOX', 'Inbox', 'system')")
+            .execute(&database.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO messages
+             (id, thread_id, subject, internal_date, body_plain)
+             VALUES ('message-1', 'thread-1', 'MigrationToken', 1, 'kept body')",
+        )
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO message_labels (message_id, label_id) VALUES ('message-1', 'INBOX')",
+        )
+        .execute(&database.pool)
+        .await?;
+
+        database.run_migrations().await?;
+
+        assert_eq!(
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT labels.name, messages.body_plain
+                 FROM message_labels
+                 JOIN labels ON labels.id = message_labels.label_id
+                 JOIN messages ON messages.id = message_labels.message_id"
+            )
+            .fetch_one(&database.pool)
+            .await?,
+            ("Inbox".to_string(), "kept body".to_string())
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'MigrationToken'"
+            )
+            .fetch_one(&database.pool)
+            .await?,
+            1
+        );
+
+        sqlx::query("UPDATE messages SET subject = 'UpdatedToken' WHERE id = 'message-1'")
+            .execute(&database.pool)
+            .await?;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'UpdatedToken'"
+            )
+            .fetch_one(&database.pool)
+            .await?,
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'MigrationToken'"
+            )
+            .fetch_one(&database.pool)
+            .await?,
+            0
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_accepts_whitespace_normalized_v0_schema() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        let normalized_v0 = V0_SCHEMA
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n");
+        sqlx::query(&normalized_v0).execute(&database.pool).await?;
+
+        database.run_migrations().await?;
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(&database.pool)
+                .await?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_incompatible_messages_without_writes() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        sqlx::query("CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL)")
+            .execute(&database.pool)
+            .await?;
+
+        assert_unsupported_schema(&database).await
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_incompatible_trigger_without_writes() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        initialize_v0(&database).await?;
+        sqlx::query(
+            "DROP TRIGGER messages_ai;
+             CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN SELECT 1; END;",
+        )
+        .execute(&database.pool)
+        .await?;
+
+        assert_unsupported_schema(&database).await
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_incompatible_index_without_writes() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        initialize_v0(&database).await?;
+        sqlx::query(
+            "DROP INDEX idx_messages_thread_id;
+             CREATE INDEX idx_messages_thread_id ON messages(subject);",
+        )
+        .execute(&database.pool)
+        .await?;
+
+        assert_unsupported_schema(&database).await
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_incompatible_fts_without_writes() -> Result<()> {
+        let (_directory, database) = temporary_database().await?;
+        initialize_v0(&database).await?;
+        sqlx::query(
+            "DROP TABLE messages_fts;
+             CREATE VIRTUAL TABLE messages_fts USING fts5(
+                 subject,
+                 content='messages',
+                 content_rowid='rowid'
+             );",
+        )
+        .execute(&database.pool)
+        .await?;
+
+        assert_unsupported_schema(&database).await
     }
 }

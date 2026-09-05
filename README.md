@@ -124,7 +124,8 @@ Your Name"""
 
 - **Authentication Failed**: Ensure `credentials.json` is present and correctly
   configured in Google Cloud.
-- **Database Errors**: If the local cache becomes corrupted, you can safely
-  delete `gtui.db` and the app will re-sync on next startup.
+- **Database Errors**: Schema upgrades run automatically at startup. Delete
+  `gtui.db` only as a last-resort recovery action for a corrupted or unsupported
+  cache; the app will re-sync on next startup.
 - **Keychain Access**: Ensure the app has permission to access the macOS Keychain
   if prompted.
