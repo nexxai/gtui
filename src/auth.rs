@@ -4,12 +4,12 @@ use keyring::Entry;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
+use yup_oauth2::storage::{TokenInfo, TokenStorage};
 use yup_oauth2::{
     ApplicationSecret, InstalledFlowAuthenticator, InstalledFlowReturnMethod,
     read_application_secret,
 };
-use yup_oauth2::authenticator_delegate::InstalledFlowDelegate;
-use yup_oauth2::storage::{TokenInfo, TokenStorage};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -107,7 +107,9 @@ pub async fn authenticate(
     secret: ApplicationSecret,
     delegate: TuiDelegate,
 ) -> Result<
-    oauth2::authenticator::Authenticator<hyper_rustls::HttpsConnector<hyper::client::HttpConnector>>,
+    oauth2::authenticator::Authenticator<
+        hyper_rustls::HttpsConnector<hyper::client::HttpConnector>,
+    >,
 > {
     InstalledFlowAuthenticator::builder(secret, InstalledFlowReturnMethod::HTTPRedirect)
         .with_storage(Box::new(RingStorage))

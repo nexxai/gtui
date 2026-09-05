@@ -38,12 +38,12 @@ pub enum ComposeField {
     Body,
 }
 
-pub struct ComposeState<'a> {
-    pub to: TextArea<'a>,
-    pub cc: TextArea<'a>,
-    pub bcc: TextArea<'a>,
-    pub subject: TextArea<'a>,
-    pub body: TextArea<'a>,
+pub struct ComposeState {
+    pub to: TextArea<'static>,
+    pub cc: TextArea<'static>,
+    pub bcc: TextArea<'static>,
+    pub subject: TextArea<'static>,
+    pub body: TextArea<'static>,
     pub focused_field: ComposeField,
     pub show_cc_bcc: bool,
 }
@@ -57,7 +57,7 @@ fn single_line_textarea(text: &str) -> TextArea<'static> {
     ta
 }
 
-impl<'a> ComposeState<'a> {
+impl ComposeState {
     pub fn new(to: &str, cc: &str, bcc: &str, subject: &str, body: &str) -> Self {
         let body_lines: Vec<String> = body.lines().map(String::from).collect();
         let mut body_textarea = TextArea::new(body_lines);
@@ -95,7 +95,7 @@ impl<'a> ComposeState<'a> {
         self.body.lines().join("\n")
     }
 
-    pub fn focused_textarea(&mut self) -> &mut TextArea<'a> {
+    pub fn focused_textarea(&mut self) -> &mut TextArea<'static> {
         match self.focused_field {
             ComposeField::To => &mut self.to,
             ComposeField::Cc => &mut self.cc,
@@ -106,7 +106,7 @@ impl<'a> ComposeState<'a> {
     }
 }
 
-pub struct UIState<'a> {
+pub struct UIState {
     pub labels: Vec<models::Label>,
     pub messages: Vec<models::Message>,
     pub threaded_messages: Vec<models::Message>,
@@ -116,7 +116,7 @@ pub struct UIState<'a> {
     pub detail_scroll: u16,
     pub focused_panel: FocusedPanel,
     pub mode: UIMode,
-    pub compose_state: Option<ComposeState<'a>>,
+    pub compose_state: Option<ComposeState>,
     pub auth_url: Option<String>,
     pub remote_signature: Option<String>,
     pub sync_state: Arc<Mutex<SyncState>>,
@@ -124,7 +124,7 @@ pub struct UIState<'a> {
     pub toast: Option<Toast>,
 }
 
-impl<'a> Default for UIState<'a> {
+impl Default for UIState {
     fn default() -> Self {
         Self {
             labels: Vec::new(),
@@ -146,14 +146,22 @@ impl<'a> Default for UIState<'a> {
     }
 }
 
-impl<'a> UIState<'a> {
+impl UIState {
     pub async fn refresh_labels_and_messages(
         &mut self,
         db: &db::Database,
         limit: i64,
         current_offset: &mut i64,
     ) -> Result<()> {
+        let selected_label_id = self
+            .labels
+            .get(self.selected_label_index)
+            .map(|label| label.id.clone());
         self.labels = db.get_labels().await?;
+        self.selected_label_index = selected_label_id
+            .as_deref()
+            .and_then(|id| self.labels.iter().position(|label| label.id == id))
+            .unwrap_or(0);
         if let Some(label) = self.labels.get(self.selected_label_index) {
             let mut new_messages = db
                 .get_messages_by_label(&label.id, limit, *current_offset)
@@ -185,6 +193,10 @@ impl<'a> UIState<'a> {
                 tracing::debug!("clearing threaded_messages (no messages in label)");
                 self.threaded_messages.clear();
             }
+        } else {
+            self.messages.clear();
+            self.threaded_messages.clear();
+            self.selected_message_index = 0;
         }
 
         Ok(())
@@ -207,7 +219,7 @@ impl<'a> UIState<'a> {
     }
 }
 
-pub fn render(f: &mut Frame, state: &mut UIState<'_>) {
+pub fn render(f: &mut Frame, state: &mut UIState) {
     if let UIMode::Authentication = state.mode {
         render_authentication(f, state);
         return;
@@ -245,7 +257,7 @@ fn focused_border_style(is_focused: bool) -> Style {
     }
 }
 
-fn render_labels_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
+fn render_labels_panel(f: &mut Frame, state: &UIState, area: Rect) {
     let items: Vec<ListItem> = state
         .labels
         .iter()
@@ -276,7 +288,7 @@ fn render_labels_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
     f.render_widget(labels_list, area);
 }
 
-fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
+fn render_messages_panel(f: &mut Frame, state: &mut UIState, area: Rect) {
     let list_width = area.width.saturating_sub(2) as usize; // Inset from sides
 
     let msg_items: Vec<ListItem> = state
@@ -310,20 +322,20 @@ fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
             let t_label = format!(" Time: {}", time_str);
             let sub_label = format!(" {}Subj: {}", reply_indicator, subject);
 
-            let pad = |s: String, len: usize| {
-                let char_count = s.chars().count();
+            let pad = |text: &str, len: usize| {
+                let char_count = text.chars().count();
                 if char_count > len {
-                    let truncated: String = s.chars().take(len.saturating_sub(3)).collect();
+                    let truncated: String = text.chars().take(len.saturating_sub(3)).collect();
                     format!("{}...", truncated)
                 } else {
-                    format!("{:width$}", s, width = len)
+                    format!("{text:width$}", width = len)
                 }
             };
 
             let inner_len = list_width.saturating_sub(2);
-            let line1 = pad(s_label, inner_len).to_string();
-            let line2 = pad(t_label, inner_len).to_string();
-            let line3 = pad(sub_label, inner_len).to_string();
+            let line1 = pad(&s_label, inner_len);
+            let line2 = pad(&t_label, inner_len);
+            let line3 = pad(&sub_label, inner_len);
 
             let is_selected = i == state.selected_message_index;
             let indicator = if is_selected { "█" } else { " " };
@@ -406,7 +418,7 @@ fn render_messages_panel(f: &mut Frame, state: &mut UIState<'_>, area: Rect) {
     }
 }
 
-fn render_details_panel(f: &mut Frame, state: &UIState<'_>, area: Rect) {
+fn render_details_panel(f: &mut Frame, state: &UIState, area: Rect) {
     tracing::debug!(
         threaded_msgs = state.threaded_messages.len(),
         selected_idx = state.selected_message_index,
@@ -502,7 +514,13 @@ fn compose_border_style(is_focused: bool) -> Style {
 }
 
 /// Apply a titled border to a TextArea and render it into `area`.
-fn render_compose_field<'a>(f: &mut Frame, textarea: &mut TextArea<'a>, title: &'a str, is_focused: bool, area: Rect) {
+fn render_compose_field(
+    f: &mut Frame,
+    textarea: &mut TextArea<'static>,
+    title: &'static str,
+    is_focused: bool,
+    area: Rect,
+) {
     textarea.set_block(
         Block::default()
             .borders(Borders::ALL)
@@ -512,7 +530,7 @@ fn render_compose_field<'a>(f: &mut Frame, textarea: &mut TextArea<'a>, title: &
     f.render_widget(&*textarea, area);
 }
 
-fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
+fn render_compose_popup(f: &mut Frame, state: &mut UIState) {
     // Popup for composing
     if let UIMode::Composing = state.mode
         && let Some(cs) = &mut state.compose_state
@@ -537,17 +555,41 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
 
         let mut chunk = 0;
 
-        render_compose_field(f, &mut cs.to, " To ", cs.focused_field == ComposeField::To, chunks[chunk]);
+        render_compose_field(
+            f,
+            &mut cs.to,
+            " To ",
+            cs.focused_field == ComposeField::To,
+            chunks[chunk],
+        );
         chunk += 1;
 
         if cs.show_cc_bcc {
-            render_compose_field(f, &mut cs.cc, " Cc ", cs.focused_field == ComposeField::Cc, chunks[chunk]);
+            render_compose_field(
+                f,
+                &mut cs.cc,
+                " Cc ",
+                cs.focused_field == ComposeField::Cc,
+                chunks[chunk],
+            );
             chunk += 1;
-            render_compose_field(f, &mut cs.bcc, " Bcc ", cs.focused_field == ComposeField::Bcc, chunks[chunk]);
+            render_compose_field(
+                f,
+                &mut cs.bcc,
+                " Bcc ",
+                cs.focused_field == ComposeField::Bcc,
+                chunks[chunk],
+            );
             chunk += 1;
         }
 
-        render_compose_field(f, &mut cs.subject, " Subject ", cs.focused_field == ComposeField::Subject, chunks[chunk]);
+        render_compose_field(
+            f,
+            &mut cs.subject,
+            " Subject ",
+            cs.focused_field == ComposeField::Subject,
+            chunks[chunk],
+        );
         chunk += 1;
 
         let body_title = if cs.show_cc_bcc {
@@ -555,11 +597,17 @@ fn render_compose_popup(f: &mut Frame, state: &mut UIState<'_>) {
         } else {
             " Body [Esc to Cancel, Ctrl-S to Send, Tab to Switch, Ctrl-B to Show CC/BCC] "
         };
-        render_compose_field(f, &mut cs.body, body_title, cs.focused_field == ComposeField::Body, chunks[chunk]);
+        render_compose_field(
+            f,
+            &mut cs.body,
+            body_title,
+            cs.focused_field == ComposeField::Body,
+            chunks[chunk],
+        );
     }
 }
 
-fn render_authentication(f: &mut Frame, state: &mut UIState<'_>) {
+fn render_authentication(f: &mut Frame, state: &mut UIState) {
     let area = centered_rect(60, 40, f.area());
     f.render_widget(Clear, area);
 
@@ -628,14 +676,10 @@ fn clean_body(body: &str) -> String {
     let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
     let mut result = String::with_capacity(normalized.len());
 
-    // Split by newline. This gives us lines, but also empty strings for consecutive newlines.
-    // We want to treat whitespace-only lines as empty lines.
-    let lines: Vec<&str> = normalized.split('\n').collect();
-
     let mut consecutive_empty_lines = 0;
     let mut first_content = true;
 
-    for line in lines {
+    for line in normalized.split('\n') {
         let trimmed = line.trim_end();
 
         if trimmed.is_empty() {

@@ -238,7 +238,7 @@ impl GmailClient {
     ) -> Result<Option<String>> {
         debug!(to, subject, body_len = body.len(), "sending message");
 
-        let raw_message = format!("{}\r\n\r\n{}", build_headers(to, cc, bcc, subject), body);
+        let raw_message = format!("{}\r\n\r\n{}", build_headers(to, cc, bcc, subject)?, body);
 
         use std::io::Cursor;
         let cursor = Cursor::new(raw_message.into_bytes());
@@ -309,7 +309,13 @@ fn encode_header_value(value: &str) -> String {
     format!("=?UTF-8?B?{}?=", encoded)
 }
 
-fn build_headers(to: &str, cc: &str, bcc: &str, subject: &str) -> String {
+fn build_headers(to: &str, cc: &str, bcc: &str, subject: &str) -> Result<String> {
+    for (name, value) in [("To", to), ("Cc", cc), ("Bcc", bcc), ("Subject", subject)] {
+        if value.contains(['\r', '\n']) {
+            anyhow::bail!("{name} must not contain line breaks");
+        }
+    }
+
     let mut headers = vec![
         "From: me".to_string(),
         format!("To: {}", to),
@@ -324,7 +330,7 @@ fn build_headers(to: &str, cc: &str, bcc: &str, subject: &str) -> String {
     }
 
     headers.push("Content-Type: text/plain; charset=\"UTF-8\"".to_string());
-    headers.join("\r\n")
+    Ok(headers.join("\r\n"))
 }
 
 fn parse_headers(
@@ -380,4 +386,22 @@ fn decode_body(part: &google_gmail1::api::MessagePart, mime_type: &str) -> Optio
 
 fn has_label(label_ids: Option<&[String]>, label: &str) -> bool {
     label_ids.is_some_and(|ids| ids.iter().any(|id| id == label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_headers_rejects_header_injection() {
+        assert!(
+            build_headers(
+                "recipient@example.com",
+                "",
+                "",
+                "Hello\r\nBcc: attacker@example.com"
+            )
+            .is_err()
+        );
+    }
 }

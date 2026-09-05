@@ -59,7 +59,6 @@ pub fn spawn_sync_task(
     mut priority_rx: mpsc::Receiver<String>,
 ) {
     tokio::spawn(async move {
-
         let sync_interval_seconds = Config::load().sync_interval_seconds;
 
         loop {

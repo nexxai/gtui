@@ -1,7 +1,7 @@
 use crate::models;
 use anyhow::Result;
 use inflections::case::to_title_case;
-use sqlx::{Row, sqlite::SqlitePool};
+use sqlx::sqlite::SqlitePool;
 
 #[derive(Clone)]
 pub struct Database {
@@ -44,10 +44,9 @@ impl Database {
     }
 
     pub async fn get_labels(&self) -> Result<Vec<models::Label>> {
-        let mut labels: Vec<models::Label> =
-            sqlx::query_as(include_str!("../sql/get_labels.sql"))
-                .fetch_all(&self.pool)
-                .await?;
+        let mut labels: Vec<models::Label> = sqlx::query_as(include_str!("../sql/get_labels.sql"))
+            .fetch_all(&self.pool)
+            .await?;
 
         // Derive display_name from the raw name
         for label in &mut labels {
@@ -127,13 +126,13 @@ impl Database {
         label_id: &str,
         limit: i64,
     ) -> Result<Vec<(String, i64)>> {
-        let rows = sqlx::query(include_str!("../sql/get_messages_with_dates_by_label.sql"))
+        let rows = sqlx::query_as(include_str!("../sql/get_messages_with_dates_by_label.sql"))
             .bind(label_id)
             .bind(limit)
             .fetch_all(&self.pool)
             .await?;
 
-        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+        Ok(rows)
     }
 
     pub async fn mark_message_as_read(&self, id: &str, is_read: bool) -> Result<()> {
@@ -154,23 +153,25 @@ impl Database {
     }
 
     pub async fn get_message_date(&self, id: &str) -> Result<Option<i64>> {
-        let row = sqlx::query(include_str!("../sql/get_message_date.sql"))
+        let row = sqlx::query_scalar(include_str!("../sql/get_message_date.sql"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
 
-        Ok(row.map(|r| r.get(0)))
+        Ok(row)
     }
 
     pub async fn delete_message(&self, id: &str) -> Result<()> {
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(include_str!("../sql/delete_message_labels.sql"))
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
         sqlx::query(include_str!("../sql/delete_message.sql"))
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

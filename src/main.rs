@@ -15,11 +15,13 @@ use crate::gmail::GmailClient;
 use crate::toast::{Toast, ToastPosition};
 use crate::ui::FocusedPanel;
 use crate::undo::UndoableAction;
+use anyhow::Context;
 use chrono::{DateTime, Local};
 use google_gmail1::Gmail;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::{
+    cursor::Show,
     event::{self, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -37,11 +39,26 @@ struct App {
     refresh_tx: tokio::sync::mpsc::Sender<()>,
     current_offset: i64,
     limit: i64,
+    has_more_messages: bool,
+}
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            ratatui::crossterm::terminal::LeaveAlternateScreen,
+            ratatui::crossterm::event::DisableMouseCapture,
+            Show
+        );
+    }
 }
 
 impl App {
     /// Get the currently-selected label ID, defaulting to INBOX.
-    fn current_label_id(&self, ui_state: &ui::UIState<'_>) -> String {
+    fn current_label_id(&self, ui_state: &ui::UIState) -> String {
         ui_state
             .labels
             .get(ui_state.selected_label_index)
@@ -52,16 +69,18 @@ impl App {
     /// Select a new label, reload messages, and notify the sync task.
     async fn select_label(
         &mut self,
-        ui_state: &mut ui::UIState<'_>,
+        ui_state: &mut ui::UIState,
         label_index: usize,
     ) -> anyhow::Result<()> {
         ui_state.selected_label_index = label_index;
         let label_id = ui_state.labels[label_index].id.clone();
         self.current_offset = 0;
-        ui_state.messages = self
+        let messages = self
             .db
             .get_messages_by_label(&label_id, self.limit, self.current_offset)
             .await?;
+        self.has_more_messages = messages.len() == self.limit as usize;
+        ui_state.messages = messages;
         ui_state.selected_message_index = 0;
         ui_state.detail_scroll = 0;
         ui_state.load_thread_for_selected(&self.db).await?;
@@ -70,7 +89,7 @@ impl App {
     }
 
     /// Remove the currently-selected message from the UI list and clamp the index.
-    fn remove_selected_message(&self, ui_state: &mut ui::UIState<'_>) {
+    fn remove_selected_message(&self, ui_state: &mut ui::UIState) {
         ui_state.messages.remove(ui_state.selected_message_index);
         if ui_state.selected_message_index >= ui_state.messages.len()
             && !ui_state.messages.is_empty()
@@ -87,7 +106,7 @@ impl App {
 async fn handle_navigation_keys(
     key: &KeyEvent,
     app: &mut App,
-    ui_state: &mut ui::UIState<'_>,
+    ui_state: &mut ui::UIState,
 ) -> anyhow::Result<bool> {
     // Panel switching
     if matches_key(*key, &app.config.keybindings.prev_panel) {
@@ -136,19 +155,20 @@ async fn handle_navigation_keys(
                     }
 
                     // Lazy-load more messages near the end
-                    if ui_state.selected_message_index
-                        >= ui_state.messages.len().saturating_sub(5)
+                    if app.has_more_messages
+                        && ui_state.selected_message_index
+                            >= ui_state.messages.len().saturating_sub(5)
                     {
-                        app.current_offset += app.limit;
+                        let next_offset = app.current_offset + app.limit;
                         if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
                             let mut additional = app
                                 .db
-                                .get_messages_by_label(
-                                    &label.id,
-                                    app.limit,
-                                    app.current_offset,
-                                )
+                                .get_messages_by_label(&label.id, app.limit, next_offset)
                                 .await?;
+                            app.has_more_messages = additional.len() == app.limit as usize;
+                            if !additional.is_empty() {
+                                app.current_offset = next_offset;
+                            }
                             ui_state.messages.append(&mut additional);
                         }
                     }
@@ -186,11 +206,7 @@ async fn handle_navigation_keys(
     Ok(false)
 }
 
-fn handle_message_actions(
-    key: &KeyEvent,
-    app: &App,
-    ui_state: &mut ui::UIState<'_>,
-) -> bool {
+fn handle_message_actions(key: &KeyEvent, app: &App, ui_state: &mut ui::UIState) -> bool {
     if matches_key(*key, &app.config.keybindings.mark_read) {
         if let Some(m) = ui_state.messages.get_mut(ui_state.selected_message_index) {
             let new_status = !m.is_read;
@@ -239,10 +255,11 @@ fn handle_message_actions(
             }
 
             let mut signature_part = String::new();
-            let sig_to_use = ui_state
-                .remote_signature
-                .as_ref()
-                .or(app.config.signatures.reply.as_ref());
+            let sig_to_use = ui_state.remote_signature.as_ref().or(app
+                .config
+                .signatures
+                .reply
+                .as_ref());
             if let Some(sig) = sig_to_use {
                 signature_part.push_str("--\n");
                 signature_part.push_str(sig);
@@ -279,10 +296,11 @@ fn handle_message_actions(
             let mut forward_body = String::new();
             forward_body.push_str("\n\n");
 
-            let sig_to_use = ui_state
-                .remote_signature
-                .as_ref()
-                .or(app.config.signatures.new_message.as_ref());
+            let sig_to_use = ui_state.remote_signature.as_ref().or(app
+                .config
+                .signatures
+                .new_message
+                .as_ref());
             if let Some(sig) = sig_to_use {
                 forward_body.push_str("--\n");
                 forward_body.push_str(sig);
@@ -326,10 +344,11 @@ fn handle_message_actions(
         let _ = execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 
         let mut body = String::new();
-        let sig_to_use = ui_state
-            .remote_signature
-            .as_ref()
-            .or(app.config.signatures.new_message.as_ref());
+        let sig_to_use = ui_state.remote_signature.as_ref().or(app
+            .config
+            .signatures
+            .new_message
+            .as_ref());
         if let Some(sig) = sig_to_use {
             body.push_str("\n\n--\n");
             body.push_str(sig);
@@ -345,7 +364,7 @@ fn handle_message_actions(
 async fn handle_delete_action(
     key: &KeyEvent,
     app: &App,
-    ui_state: &mut ui::UIState<'_>,
+    ui_state: &mut ui::UIState,
 ) -> anyhow::Result<bool> {
     if !matches_key(*key, &app.config.keybindings.delete) {
         return Ok(false);
@@ -367,12 +386,6 @@ async fn handle_delete_action(
 
         let current_label_id = app.current_label_id(ui_state);
         let original_index = ui_state.selected_message_index;
-        ui_state.undo_stack.push(UndoableAction::Delete {
-            messages: thread_messages.clone(),
-            label_id: current_label_id.clone(),
-            original_index,
-        });
-
         for id in &message_ids {
             if let Err(e) = app.db.delete_message(id).await {
                 ui_state.toast = Some(Toast::new(
@@ -419,6 +432,11 @@ async fn handle_delete_action(
         }
 
         if api_succeeded {
+            ui_state.undo_stack.push(UndoableAction::Delete {
+                messages: thread_messages,
+                label_id: current_label_id,
+                original_index,
+            });
             app.remove_selected_message(ui_state);
             ui_state.load_thread_for_selected(&app.db).await?;
         }
@@ -430,7 +448,7 @@ async fn handle_delete_action(
 async fn handle_archive_action(
     key: &KeyEvent,
     app: &App,
-    ui_state: &mut ui::UIState<'_>,
+    ui_state: &mut ui::UIState,
 ) -> anyhow::Result<bool> {
     if !matches_key(*key, &app.config.keybindings.archive) {
         return Ok(false);
@@ -544,7 +562,7 @@ async fn handle_archive_action(
 async fn handle_undo_action(
     key: &KeyEvent,
     app: &App,
-    ui_state: &mut ui::UIState<'_>,
+    ui_state: &mut ui::UIState,
 ) -> anyhow::Result<bool> {
     if !matches_key(*key, &app.config.keybindings.undo) {
         return Ok(false);
@@ -566,9 +584,7 @@ async fn handle_undo_action(
                     return Ok(true);
                 };
                 let insert_index = (*original_index).min(ui_state.messages.len());
-                ui_state
-                    .messages
-                    .insert(insert_index, representative);
+                ui_state.messages.insert(insert_index, representative);
                 ui_state.selected_message_index = insert_index;
 
                 let _ = app.db.upsert_messages(messages, label_id).await;
@@ -603,9 +619,7 @@ async fn handle_undo_action(
                     .any(|label_id| current_label == Some(label_id.as_str()))
                 {
                     let insert_index = (*original_index).min(ui_state.messages.len());
-                    ui_state
-                        .messages
-                        .insert(insert_index, representative);
+                    ui_state.messages.insert(insert_index, representative);
                     ui_state.selected_message_index = insert_index;
                 }
 
@@ -651,11 +665,7 @@ async fn handle_undo_action(
     Ok(true)
 }
 
-fn handle_composing_keys(
-    key: &KeyEvent,
-    app: &App,
-    ui_state: &mut ui::UIState<'_>,
-) -> bool {
+fn handle_composing_keys(key: &KeyEvent, app: &App, ui_state: &mut ui::UIState) -> bool {
     match key.code {
         KeyCode::Esc => {
             ui_state.mode = ui::UIMode::Browsing;
@@ -696,6 +706,14 @@ fn handle_composing_keys(
         {
             if let Some(cs) = &mut ui_state.compose_state {
                 cs.show_cc_bcc = !cs.show_cc_bcc;
+                if !cs.show_cc_bcc
+                    && matches!(
+                        cs.focused_field,
+                        ui::ComposeField::Cc | ui::ComposeField::Bcc
+                    )
+                {
+                    cs.focused_field = ui::ComposeField::To;
+                }
             }
         }
         KeyCode::Tab => {
@@ -758,7 +776,7 @@ fn handle_composing_keys(
 async fn main() -> anyhow::Result<()> {
     let config = Config::load();
     let debug_logging = std::env::args().any(|arg| arg == "--debug");
-    logging::init(debug_logging);
+    logging::init(debug_logging)?;
 
     let db = db::Database::new("sqlite:gtui.db?mode=rwc").await?;
     db.run_migrations().await?;
@@ -772,6 +790,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Setup terminal
     enable_raw_mode()?;
+    let _terminal_guard = TerminalGuard;
     let mut stdout = io::stdout();
     execute!(
         stdout,
@@ -814,6 +833,7 @@ async fn main() -> anyhow::Result<()> {
         refresh_tx,
         current_offset: 0,
         limit: 50,
+        has_more_messages: false,
     };
 
     let mut authenticated = false;
@@ -834,7 +854,7 @@ async fn main() -> anyhow::Result<()> {
                 hyper::Client::builder().build(
                     hyper_rustls::HttpsConnectorBuilder::new()
                         .with_native_roots()
-                        .expect("Failed to load native roots")
+                        .context("failed to load native TLS roots")?
                         .https_only()
                         .enable_http1()
                         .build(),
@@ -853,7 +873,9 @@ async fn main() -> anyhow::Result<()> {
             let sync_db = app.db.clone();
             let sync_refresh_tx = app.refresh_tx.clone();
             let sync_state_clone = sync_state.clone();
-            let priority_rx = priority_rx.take().unwrap();
+            let priority_rx = priority_rx
+                .take()
+                .context("sync task has already been started")?;
             sync::spawn_sync_task(
                 sync_client,
                 sync_db,
@@ -868,10 +890,12 @@ async fn main() -> anyhow::Result<()> {
                 ui_state.selected_label_index = index;
             }
             if let Some(label) = ui_state.labels.get(ui_state.selected_label_index) {
-                ui_state.messages = app
+                let messages = app
                     .db
                     .get_messages_by_label(&label.id, app.limit, app.current_offset)
                     .await?;
+                app.has_more_messages = messages.len() == app.limit as usize;
+                ui_state.messages = messages;
                 if let Some(msg) = ui_state.messages.get(ui_state.selected_message_index) {
                     ui_state.threaded_messages =
                         app.db.get_messages_by_thread(&msg.thread_id).await?;
@@ -888,6 +912,7 @@ async fn main() -> anyhow::Result<()> {
             ui_state
                 .refresh_labels_and_messages(&app.db, app.limit, &mut app.current_offset)
                 .await?;
+            app.has_more_messages = ui_state.messages.len() == app.limit as usize;
         }
 
         if let Some(toast) = &ui_state.toast
@@ -943,15 +968,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        ratatui::crossterm::terminal::LeaveAlternateScreen,
-        ratatui::crossterm::event::DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
 
     Ok(())
 }

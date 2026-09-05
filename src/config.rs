@@ -1,5 +1,6 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::fmt;
 
 const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
 
@@ -28,7 +29,12 @@ pub struct KeyBindingSet(Vec<(KeyCode, KeyModifiers)>);
 
 impl KeyBindingSet {
     fn from_strs(entries: &[&str]) -> Self {
-        Self(entries.iter().map(|s| parse_key_string(s)).collect())
+        Self(
+            entries
+                .iter()
+                .map(|entry| parse_key_string(entry).expect("default keybinding must be valid"))
+                .collect(),
+        )
     }
 }
 
@@ -48,7 +54,11 @@ impl Serialize for KeyBindingSet {
 impl<'de> Deserialize<'de> for KeyBindingSet {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let strings: Vec<String> = Vec::deserialize(deserializer)?;
-        Ok(Self(strings.iter().map(|s| parse_key_string(s)).collect()))
+        strings
+            .iter()
+            .map(|entry| parse_key_string(entry).map_err(de::Error::custom))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
     }
 }
 
@@ -107,24 +117,44 @@ impl Config {
 }
 
 /// Parse a key binding string like `"ctrl-s"` into a `(KeyCode, KeyModifiers)` pair.
-fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
-    let parts: Vec<&str> = key_str.split('-').collect();
-    let (modifiers_parts, base_key_str) = parts.split_at(parts.len().saturating_sub(1));
+#[derive(Debug)]
+struct KeyBindingParseError(String);
+
+impl fmt::Display for KeyBindingParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Parse a key binding string like `"ctrl-s"` into a key code and modifiers.
+fn parse_key_string(key_str: &str) -> Result<(KeyCode, KeyModifiers), KeyBindingParseError> {
+    let (modifier_str, base_key) = key_str.rsplit_once('-').unwrap_or(("", key_str));
+    if base_key.is_empty() {
+        return Err(KeyBindingParseError(
+            "key binding is missing a key".to_string(),
+        ));
+    }
 
     let mut modifiers = KeyModifiers::empty();
-    for part in modifiers_parts {
-        match part.to_lowercase().as_str() {
+    for modifier in modifier_str
+        .split('-')
+        .filter(|modifier| !modifier.is_empty())
+    {
+        match modifier.to_ascii_lowercase().as_str() {
             "ctrl" => modifiers.insert(KeyModifiers::CONTROL),
             "alt" => modifiers.insert(KeyModifiers::ALT),
             "shift" => modifiers.insert(KeyModifiers::SHIFT),
             "cmd" | "command" | "super" => modifiers.insert(KeyModifiers::SUPER),
             "meta" => modifiers.insert(KeyModifiers::META),
-            _ => {}
+            _ => {
+                return Err(KeyBindingParseError(format!(
+                    "unknown key modifier: {modifier}"
+                )));
+            }
         }
     }
 
-    let base = base_key_str.first().copied().unwrap_or("");
-    let code = match base {
+    let code = match base_key {
         "Backspace" => KeyCode::Backspace,
         "Enter" => KeyCode::Enter,
         "Left" => KeyCode::Left,
@@ -135,11 +165,13 @@ fn parse_key_string(key_str: &str) -> (KeyCode, KeyModifiers) {
         "BackTab" => KeyCode::BackTab,
         "Esc" => KeyCode::Esc,
         " " => KeyCode::Char(' '),
-        s if s.len() == 1 => KeyCode::Char(s.chars().next().unwrap()),
-        _ => KeyCode::Null,
+        key if key.chars().count() == 1 => KeyCode::Char(key.chars().next().expect("one char")),
+        key => {
+            return Err(KeyBindingParseError(format!("unknown key: {key}")));
+        }
     };
 
-    (code, modifiers)
+    Ok((code, modifiers))
 }
 
 /// Format a (KeyCode, KeyModifiers) pair back to a string for serialization.
@@ -215,5 +247,12 @@ mod tests {
         assert_eq!(set.0[0], (KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(set.0[1], (KeyCode::Enter, KeyModifiers::empty()));
         assert_eq!(set.0[2], (KeyCode::Char('a'), KeyModifiers::empty()));
+    }
+
+    #[test]
+    fn keybinding_set_rejects_unknown_keys_and_modifiers() {
+        for binding in [r#"["ctrl-unknown"]"#, r#"["hyper-a"]"#, r#"["ctrl-"]"#] {
+            assert!(serde_json::from_str::<KeyBindingSet>(binding).is_err());
+        }
     }
 }

@@ -40,25 +40,31 @@ impl Toast {
     }
 
     fn calculate_area(&self, area: Rect) -> Rect {
-        let width = (area.width as f32 * 0.8).clamp(20.0, 60.0) as u16;
-        let height = 3;
+        let width = area.width.saturating_mul(4).saturating_div(5).min(60);
+        let height = area.height.min(3);
+        let horizontal_padding = area.width.saturating_sub(width).min(1);
+        let vertical_padding = area.height.saturating_sub(height).min(1);
 
         let x = match self.position {
-            ToastPosition::TopLeft | ToastPosition::BottomLeft => 1,
+            ToastPosition::TopLeft | ToastPosition::BottomLeft => area.x + horizontal_padding,
             ToastPosition::TopCenter | ToastPosition::BottomCenter | ToastPosition::Middle => {
-                (area.width.saturating_sub(width)) / 2
+                area.x + area.width.saturating_sub(width) / 2
             }
             ToastPosition::TopRight | ToastPosition::BottomRight => {
-                area.width.saturating_sub(width + 1)
+                area.x + area.width.saturating_sub(width + horizontal_padding)
             }
         };
 
         let y = match self.position {
-            ToastPosition::TopLeft | ToastPosition::TopCenter | ToastPosition::TopRight => 1,
-            ToastPosition::Middle => (area.height.saturating_sub(height)) / 2,
+            ToastPosition::TopLeft | ToastPosition::TopCenter | ToastPosition::TopRight => {
+                area.y + vertical_padding
+            }
+            ToastPosition::Middle => area.y + area.height.saturating_sub(height) / 2,
             ToastPosition::BottomLeft
             | ToastPosition::BottomCenter
-            | ToastPosition::BottomRight => area.height.saturating_sub(height + 1),
+            | ToastPosition::BottomRight => {
+                area.y + area.height.saturating_sub(height + vertical_padding)
+            }
         };
 
         Rect {
@@ -90,5 +96,22 @@ impl ratatui::widgets::Widget for &Toast {
             );
 
         paragraph.render(toast_area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toast_area_stays_within_its_parent() {
+        let toast = Toast::new("test", ToastPosition::BottomRight);
+        let area = Rect::new(5, 7, 10, 2);
+        let toast_area = toast.calculate_area(area);
+
+        assert!(toast_area.x >= area.x);
+        assert!(toast_area.y >= area.y);
+        assert!(toast_area.right() <= area.right());
+        assert!(toast_area.bottom() <= area.bottom());
     }
 }
