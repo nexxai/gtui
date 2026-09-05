@@ -4,24 +4,35 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fs2::FileExt;
 use inflections::case::to_title_case;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use sqlx::ConnectOptions;
 use sqlx::Connection;
 use sqlx::migrate::Migrate;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePool};
-use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
-use std::io::ErrorKind;
+use std::fs::{DirBuilder, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 const V0_SCHEMA: &str = include_str!("../tests/fixtures/schema-v0.sql");
 const LEGACY_DATABASE_NAME: &str = "gtui.db";
+const DATA_DIRECTORY_NAME: &str = ".gtui-data";
+const QUARANTINE_MARKER_NAME: &str = ".quarantine-in-progress";
+const QUARANTINE_MARKER_TEMP_NAME: &str = ".quarantine-in-progress.tmp";
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 type SchemaObject = (String, String, String, Option<String>);
 type LedgerRow = (i64, i64, Vec<u8>);
+
+#[derive(Debug, Deserialize, Serialize)]
+struct QuarantineMarker {
+    version: u8,
+    source_database: PathBuf,
+    artifacts: Vec<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Database {
@@ -60,15 +71,21 @@ impl Database {
         account_subject: &str,
     ) -> Result<AccountOpen> {
         validate_account_subject(account_subject)?;
-        let directory = directory.as_ref();
-        let database_path = account_database_path(directory, account_subject);
+        let directory = validate_runtime_directory(directory.as_ref())?;
+        let data_directory = prepare_data_directory(&directory)?;
+        recover_quarantines(&directory, &data_directory).await?;
+
+        let database_path = account_database_path(&directory, account_subject);
+        let artifacts = existing_database_artifacts(&database_path)?;
         let lease = Arc::new(acquire_account_lease(&database_path)?);
 
-        if !database_path
-            .try_exists()
-            .context("failed to inspect account cache path")?
-        {
+        if artifacts.is_empty() {
             create_account_database(&database_path, account_subject, lease.clone()).await?;
+        } else if !artifacts.contains(&database_path) {
+            quarantine_database(&database_path, &data_directory, "quarantine")
+                .await
+                .context("failed to quarantine incomplete account cache")?;
+            bail!("account cache is missing its main database; cache quarantined");
         }
 
         let database = match Self::open_verified_account_database(
@@ -80,14 +97,16 @@ impl Database {
         {
             Ok(database) => database,
             Err(error) => {
-                quarantine_database(&database_path, "quarantine")
+                quarantine_database(&database_path, &data_directory, "quarantine")
+                    .await
                     .context("failed to quarantine invalid account cache")?;
                 return Err(error)
                     .context("account cache identity verification failed; cache quarantined");
             }
         };
-        let legacy_quarantined =
-            handle_legacy_database(directory).context("failed to handle unowned legacy cache")?;
+        let legacy_quarantined = handle_legacy_database(&directory, &data_directory)
+            .await
+            .context("failed to handle unowned legacy cache")?;
 
         Ok(AccountOpen {
             database,
@@ -100,10 +119,10 @@ impl Database {
         account_subject: &str,
         lease: Arc<File>,
     ) -> Result<Self> {
-        inspect_account_identity(path, account_subject).await?;
+        existing_database_artifacts(path)?;
         let database = Self::connect_file(path, SqliteJournalMode::Wal, lease).await?;
 
-        if let Err(error) = database.run_migrations().await {
+        if let Err(error) = database.run_account_migrations(account_subject).await {
             database.pool.close().await;
             return Err(error);
         }
@@ -136,6 +155,14 @@ impl Database {
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
+        self.run_migrations_for_account(None).await
+    }
+
+    async fn run_account_migrations(&self, account_subject: &str) -> Result<()> {
+        self.run_migrations_for_account(Some(account_subject)).await
+    }
+
+    async fn run_migrations_for_account(&self, account_subject: Option<&str>) -> Result<()> {
         let _in_memory_anchor = if self.in_memory {
             Some(
                 self.pool
@@ -152,7 +179,7 @@ impl Database {
             .await
             .context("failed to acquire database migration connection")?
             .detach();
-        let migration_result = migrate_exclusively(&mut connection).await;
+        let migration_result = migrate_exclusively(&mut connection, account_subject).await;
         let close_result = connection
             .close()
             .await
@@ -338,13 +365,83 @@ fn validate_account_subject(account_subject: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_runtime_directory(directory: &Path) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(directory)
+        .context("failed to inspect the cache runtime directory")?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        bail!("cache runtime root must be a real directory, not a symlink");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.mode() & 0o022 != 0 {
+            bail!("cache runtime root must not be writable by group or other users");
+        }
+    }
+
+    directory
+        .canonicalize()
+        .context("failed to resolve the cache runtime directory")
+}
+
+fn prepare_data_directory(runtime_directory: &Path) -> Result<PathBuf> {
+    let data_directory = runtime_directory.join(DATA_DIRECTORY_NAME);
+    match std::fs::symlink_metadata(&data_directory) {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            let mut builder = DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&data_directory) {
+                Ok(()) => sync_parent(runtime_directory)?,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).context("failed to create private cache data directory");
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error).context("failed to inspect private cache data directory");
+        }
+    }
+    validate_private_directory(&data_directory, "cache data directory")?;
+
+    data_directory
+        .canonicalize()
+        .context("failed to resolve private cache data directory")
+}
+
+fn validate_private_directory(directory: &Path, description: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)
+        .with_context(|| format!("failed to inspect {description}"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        bail!("{description} must be a real directory, not a symlink");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if metadata.mode() & 0o777 != 0o700 {
+            bail!("{description} must have owner-only read, write, and execute permissions");
+        }
+    }
+    Ok(())
+}
+
 fn account_database_path(directory: &Path, account_subject: &str) -> PathBuf {
     let account_key = format!("{:x}", Sha256::digest(account_subject.as_bytes()));
-    directory.join(format!("gtui-{account_key}.db"))
+    directory
+        .join(DATA_DIRECTORY_NAME)
+        .join(format!("gtui-{account_key}.db"))
 }
 
 fn acquire_account_lease(database_path: &Path) -> Result<File> {
     let lock_path = database_path.with_extension("lock");
+    validate_regular_file_if_present(&lock_path, "account cache lease")?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true);
     #[cfg(unix)]
@@ -353,8 +450,10 @@ fn acquire_account_lease(database_path: &Path) -> Result<File> {
         options.mode(0o600);
     }
     let lease = options
-        .open(lock_path)
+        .open(&lock_path)
         .context("failed to open account cache lease")?;
+    validate_regular_file_if_present(&lock_path, "account cache lease")?
+        .context("account cache lease disappeared while it was being opened")?;
 
     if let Err(error) = FileExt::try_lock_exclusive(&lease) {
         if error.kind() == ErrorKind::WouldBlock {
@@ -414,21 +513,6 @@ async fn create_account_database(
     Ok(())
 }
 
-async fn inspect_account_identity(path: &Path, account_subject: &str) -> Result<()> {
-    let options = SqliteConnectOptions::new().filename(path).read_only(true);
-    let mut connection = SqliteConnection::connect_with(&options)
-        .await
-        .context("failed to inspect account cache")?;
-    let verification = verify_account_identity_connection(&mut connection, account_subject).await;
-    let close = connection
-        .close()
-        .await
-        .context("failed to close account cache identity inspection");
-
-    verification?;
-    close
-}
-
 async fn verify_account_identity(pool: &SqlitePool, account_subject: &str) -> Result<()> {
     let rows = sqlx::query_as::<_, (i64, String)>(
         "SELECT singleton, account_subject FROM account_identity",
@@ -461,7 +545,7 @@ fn verify_account_identity_rows(rows: &[(i64, String)], account_subject: &str) -
     validate_account_subject(&rows[0].1)
 }
 
-fn handle_legacy_database(directory: &Path) -> Result<bool> {
+async fn handle_legacy_database(directory: &Path, data_directory: &Path) -> Result<bool> {
     let path = directory.join(LEGACY_DATABASE_NAME);
     let artifacts = existing_database_artifacts(&path)?;
     if artifacts.is_empty() {
@@ -469,87 +553,88 @@ fn handle_legacy_database(directory: &Path) -> Result<bool> {
     }
 
     let nonempty = artifacts.iter().try_fold(false, |nonempty, artifact| {
-        Ok::<_, std::io::Error>(nonempty || artifact.metadata()?.len() != 0)
+        Ok::<_, anyhow::Error>(
+            nonempty
+                || validate_regular_file_if_present(artifact, "legacy cache artifact")?
+                    .context("legacy cache artifact disappeared during inspection")?
+                    .len()
+                    != 0,
+        )
     })?;
     if nonempty {
-        quarantine_database(&path, "unowned-backup")?;
+        quarantine_database(&path, data_directory, "unowned-backup").await?;
         return Ok(true);
     }
 
     for artifact in artifacts {
+        validate_regular_file_if_present(&artifact, "legacy cache artifact")?
+            .context("legacy cache artifact disappeared before removal")?;
         std::fs::remove_file(artifact).context("failed to remove empty legacy cache")?;
     }
     sync_parent(directory)?;
     Ok(false)
 }
 
-fn quarantine_database(database_path: &Path, suffix: &str) -> Result<bool> {
+async fn quarantine_database(
+    database_path: &Path,
+    data_directory: &Path,
+    suffix: &str,
+) -> Result<Option<PathBuf>> {
+    start_quarantine(database_path, data_directory, suffix, None).await
+}
+
+async fn start_quarantine(
+    database_path: &Path,
+    data_directory: &Path,
+    suffix: &str,
+    stop_after_moves: Option<usize>,
+) -> Result<Option<PathBuf>> {
     let sources = existing_database_artifacts(database_path)?;
     if sources.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
-    let directory = database_path
-        .parent()
-        .context("cache path has no parent directory")?;
+    require_quiescent_sqlite(database_path).await?;
 
-    for attempt in 0_u64.. {
-        let destinations = sources
+    let backup_directory = create_private_backup_directory(data_directory, suffix)?;
+    let marker = QuarantineMarker {
+        version: 1,
+        source_database: database_path.to_path_buf(),
+        artifacts: sources
             .iter()
-            .map(|source| quarantine_path(directory, source, attempt, suffix))
-            .collect::<Result<Vec<_>>>()?;
-        let mut linked = Vec::new();
-        let mut collision = false;
+            .map(|source| {
+                source
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("cache artifact has no valid file name")
+                    .map(str::to_owned)
+            })
+            .collect::<Result<_>>()?,
+    };
+    write_quarantine_marker(&backup_directory, &marker)?;
+    resume_quarantine(&backup_directory, marker, stop_after_moves)?;
 
-        for (source, destination) in sources.iter().zip(&destinations) {
-            match std::fs::hard_link(source, destination) {
-                Ok(()) => linked.push(destination.clone()),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    collision = true;
-                    break;
-                }
-                Err(error) => {
-                    remove_links(&linked)?;
-                    return Err(error).context("failed to quarantine cache artifact");
-                }
-            }
-        }
-        if collision {
-            remove_links(&linked)?;
-            continue;
-        }
-
-        for destination in &destinations {
-            File::open(destination)?
-                .sync_all()
-                .context("failed to sync quarantined cache artifact")?;
-        }
-        for source in &sources {
-            std::fs::remove_file(source).context("failed to remove quarantined cache artifact")?;
-        }
-        sync_parent(directory)?;
-        return Ok(true);
-    }
-
-    unreachable!("unbounded quarantine suffix search exhausted")
+    Ok(Some(backup_directory))
 }
 
 fn existing_database_artifacts(database_path: &Path) -> Result<Vec<PathBuf>> {
     database_artifacts(database_path)
         .into_iter()
-        .filter_map(|path| match path.try_exists() {
-            Ok(true) => Some(Ok(path)),
-            Ok(false) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<std::io::Result<Vec<_>>>()
-        .context("failed to inspect cache artifacts")
+        .filter_map(
+            |path| match validate_regular_file_if_present(&path, "SQLite cache artifact") {
+                Ok(Some(_)) => Some(Ok(path)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
+        .collect()
 }
 
-fn database_artifacts(database_path: &Path) -> [PathBuf; 3] {
+fn database_artifacts(database_path: &Path) -> [PathBuf; 4] {
     [
         database_path.to_path_buf(),
         sidecar_path(database_path, "-wal"),
         sidecar_path(database_path, "-shm"),
+        sidecar_path(database_path, "-journal"),
     ]
 }
 
@@ -559,21 +644,355 @@ fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn quarantine_path(directory: &Path, source: &Path, attempt: u64, suffix: &str) -> Result<PathBuf> {
-    let mut name = OsString::from(
-        source
-            .file_name()
-            .context("cache artifact path has no file name")?,
-    );
-    name.push(format!(".{attempt}.{suffix}"));
-    Ok(directory.join(name))
+fn validate_regular_file_if_present(
+    path: &Path,
+    description: &str,
+) -> Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {description}"));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!("{description} must be a regular file, not a symlink or special file");
+    }
+    Ok(Some(metadata))
 }
 
-fn remove_links(paths: &[PathBuf]) -> Result<()> {
-    for path in paths {
-        std::fs::remove_file(path).context("failed to clean partial cache quarantine")?;
+fn create_private_backup_directory(data_directory: &Path, suffix: &str) -> Result<PathBuf> {
+    if !matches!(suffix, "quarantine" | "unowned-backup") {
+        bail!("invalid cache quarantine kind");
     }
+
+    for attempt in 0_u64.. {
+        let backup_directory = data_directory.join(format!("{suffix}-{attempt}"));
+        let mut builder = DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&backup_directory) {
+            Ok(()) => {
+                validate_private_directory(&backup_directory, "cache backup directory")?;
+                sync_parent(data_directory)?;
+                return Ok(backup_directory);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).context("failed to create private cache backup directory");
+            }
+        }
+    }
+
+    unreachable!("unbounded cache backup directory search exhausted")
+}
+
+fn write_quarantine_marker(backup_directory: &Path, marker: &QuarantineMarker) -> Result<()> {
+    let temporary_path = backup_directory.join(QUARANTINE_MARKER_TEMP_NAME);
+    let marker_path = backup_directory.join(QUARANTINE_MARKER_NAME);
+    let bytes = serde_json::to_vec(marker).context("failed to encode cache quarantine marker")?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary_path)
+        .context("failed to create cache quarantine marker")?;
+    file.write_all(&bytes)
+        .context("failed to write cache quarantine marker")?;
+    file.sync_all()
+        .context("failed to sync cache quarantine marker")?;
+    drop(file);
+    std::fs::rename(&temporary_path, &marker_path)
+        .context("failed to install cache quarantine marker")?;
+    sync_parent(backup_directory)?;
+    sync_parent(
+        backup_directory
+            .parent()
+            .context("cache backup directory has no parent")?,
+    )
+}
+
+async fn recover_quarantines(runtime_directory: &Path, data_directory: &Path) -> Result<()> {
+    let mut backup_directories = Vec::new();
+    for entry in
+        std::fs::read_dir(data_directory).context("failed to scan private cache data directory")?
+    {
+        let entry = entry.context("failed to inspect private cache data entry")?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .context("failed to inspect private cache data entry")?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !metadata.file_type().is_dir() {
+            if is_backup_directory_name(&name) {
+                bail!("cache backup path must be a real directory, not a symlink or special file");
+            }
+            continue;
+        }
+
+        match std::fs::symlink_metadata(path.join(QUARANTINE_MARKER_NAME)) {
+            Ok(_) => backup_directories.push(path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("failed to inspect cache quarantine marker"),
+        }
+    }
+    backup_directories.sort();
+
+    for backup_directory in backup_directories {
+        validate_private_directory(&backup_directory, "cache backup directory")?;
+        let marker = read_quarantine_marker(&backup_directory)?;
+        validate_quarantine_marker(&marker, runtime_directory, data_directory)?;
+
+        let _lease = if marker.source_database.parent() == Some(data_directory) {
+            Some(acquire_account_lease(&marker.source_database)?)
+        } else {
+            None
+        };
+        if validate_regular_file_if_present(&marker.source_database, "SQLite cache artifact")?
+            .is_some()
+        {
+            require_quiescent_sqlite(&marker.source_database).await?;
+        }
+        resume_quarantine(&backup_directory, marker, None)?;
+    }
+
     Ok(())
+}
+
+fn is_backup_directory_name(name: &str) -> bool {
+    ["quarantine-", "unowned-backup-"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|attempt| {
+            !attempt.is_empty() && attempt.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn read_quarantine_marker(backup_directory: &Path) -> Result<QuarantineMarker> {
+    let marker_path = backup_directory.join(QUARANTINE_MARKER_NAME);
+    validate_regular_file_if_present(&marker_path, "cache quarantine marker")?
+        .context("cache quarantine marker disappeared during recovery")?;
+    let file = File::open(marker_path).context("failed to open cache quarantine marker")?;
+    serde_json::from_reader(file).context("failed to decode cache quarantine marker")
+}
+
+fn validate_quarantine_marker(
+    marker: &QuarantineMarker,
+    runtime_directory: &Path,
+    data_directory: &Path,
+) -> Result<()> {
+    if marker.version != 1 {
+        bail!("unsupported cache quarantine marker version");
+    }
+    let source_parent = marker
+        .source_database
+        .parent()
+        .context("cache quarantine marker source has no parent")?;
+    let source_name = marker
+        .source_database
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("cache quarantine marker source has no valid name")?;
+    let is_legacy = source_parent == runtime_directory && source_name == LEGACY_DATABASE_NAME;
+    let is_account = source_parent == data_directory && is_account_database_name(source_name);
+    if !is_legacy && !is_account {
+        bail!("cache quarantine marker names an unexpected source");
+    }
+
+    let expected = database_artifacts(&marker.source_database)
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .filter(|name| marker.artifacts.contains(name))
+        .collect::<Vec<_>>();
+    if marker.artifacts.is_empty() || marker.artifacts != expected {
+        bail!("cache quarantine marker has an invalid artifact manifest");
+    }
+
+    Ok(())
+}
+
+fn is_account_database_name(name: &str) -> bool {
+    name.strip_prefix("gtui-")
+        .and_then(|name| name.strip_suffix(".db"))
+        .is_some_and(|key| {
+            key.len() == 64
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn resume_quarantine(
+    backup_directory: &Path,
+    marker: QuarantineMarker,
+    stop_after_moves: Option<usize>,
+) -> Result<()> {
+    if stop_after_moves == Some(0) {
+        bail!("injected quarantine interruption");
+    }
+
+    let source_directory = marker
+        .source_database
+        .parent()
+        .context("quarantine marker source has no parent directory")?;
+    let mut moved = 0;
+    // The manifest stays immutable; each source/destination pair is the durable stage record.
+    for source in database_artifacts(&marker.source_database) {
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("cache artifact has no valid name")?;
+        let destination = backup_directory.join(name);
+        let source_exists =
+            validate_regular_file_if_present(&source, "SQLite cache artifact")?.is_some();
+        let destination_exists =
+            validate_regular_file_if_present(&destination, "quarantined cache artifact")?.is_some();
+
+        if !marker.artifacts.iter().any(|artifact| artifact == name) {
+            if source_exists || destination_exists {
+                bail!("cache quarantine recovery found an untracked artifact");
+            }
+            continue;
+        }
+
+        match (source_exists, destination_exists) {
+            (true, false) => {
+                File::open(&source)
+                    .context("failed to open cache artifact before quarantine")?
+                    .sync_all()
+                    .context("failed to sync cache artifact before quarantine")?;
+                std::fs::rename(&source, &destination)
+                    .context("failed to move cache artifact into quarantine")?;
+                validate_regular_file_if_present(&destination, "quarantined cache artifact")?
+                    .context("quarantined cache artifact disappeared after move")?;
+                File::open(&destination)
+                    .context("failed to open quarantined cache artifact")?
+                    .sync_all()
+                    .context("failed to sync quarantined cache artifact")?;
+                sync_parent(source_directory)?;
+                sync_parent(backup_directory)?;
+                moved += 1;
+                if stop_after_moves == Some(moved) {
+                    bail!("injected quarantine interruption");
+                }
+            }
+            (false, true) => {
+                File::open(&destination)
+                    .context("failed to reopen quarantined cache artifact")?
+                    .sync_all()
+                    .context("failed to resync quarantined cache artifact")?;
+                sync_parent(source_directory)?;
+                sync_parent(backup_directory)?;
+            }
+            (true, true) => {
+                bail!("cache quarantine recovery refused to overwrite an existing artifact");
+            }
+            (false, false) => bail!("cache quarantine recovery found a missing artifact"),
+        }
+    }
+
+    let marker_path = backup_directory.join(QUARANTINE_MARKER_NAME);
+    validate_regular_file_if_present(&marker_path, "cache quarantine marker")?
+        .context("cache quarantine marker disappeared before completion")?;
+    std::fs::remove_file(marker_path).context("failed to complete cache quarantine")?;
+    sync_parent(backup_directory)
+}
+
+async fn require_quiescent_sqlite(database_path: &Path) -> Result<()> {
+    if !has_sqlite_header(database_path)? {
+        return Ok(());
+    }
+
+    validate_regular_file_if_present(database_path, "SQLite cache artifact")?
+        .context("SQLite cache artifact disappeared before exclusive check")?;
+    let options = SqliteConnectOptions::new()
+        .filename(database_path)
+        .create_if_missing(false);
+    let mut connection = match SqliteConnection::connect_with(&options).await {
+        Ok(connection) => connection,
+        Err(error) if sqlite_error_is_invalid(&error) => return Ok(()),
+        Err(error) if sqlite_error_is_busy(&error) => {
+            bail!("cache is busy; close every process using it before retrying")
+        }
+        Err(error) => return Err(error).context("failed to open cache for exclusive check"),
+    };
+    let check = async {
+        sqlx::query("PRAGMA busy_timeout = 0")
+            .execute(&mut connection)
+            .await?;
+        acquire_exclusive_lock(&mut connection).await?;
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_schema")
+            .fetch_one(&mut connection)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let close = connection.close().await;
+
+    match check {
+        Ok(()) => close.context("failed to close cache after exclusive check"),
+        Err(error) if anyhow_error_is_sqlite_invalid(&error) => Ok(()),
+        Err(error) if anyhow_error_is_sqlite_busy(&error) => {
+            bail!("cache is busy; close every process using it before retrying")
+        }
+        Err(error) => Err(error).context("failed to establish exclusive cache access"),
+    }
+}
+
+fn has_sqlite_header(path: &Path) -> Result<bool> {
+    let metadata = validate_regular_file_if_present(path, "SQLite cache artifact")?
+        .context("SQLite cache artifact disappeared during inspection")?;
+    if metadata.len() < SQLITE_HEADER.len() as u64 {
+        return Ok(false);
+    }
+    let mut header = [0_u8; SQLITE_HEADER.len()];
+    File::open(path)
+        .context("failed to open SQLite cache artifact for inspection")?
+        .read_exact(&mut header)
+        .context("failed to inspect SQLite cache artifact header")?;
+    Ok(&header == SQLITE_HEADER)
+}
+
+fn sqlite_error_is_busy(error: &sqlx::Error) -> bool {
+    sqlite_error_has_code(error, &[5, 6])
+}
+
+fn sqlite_error_is_invalid(error: &sqlx::Error) -> bool {
+    sqlite_error_has_code(error, &[11, 26])
+}
+
+fn sqlite_error_has_code(error: &sqlx::Error, codes: &[i32]) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| codes.contains(&(code & 0xff)))
+}
+
+fn anyhow_error_is_sqlite_busy(error: &anyhow::Error) -> bool {
+    anyhow_error_has_sqlite_code(error, &[5, 6])
+}
+
+fn anyhow_error_is_sqlite_invalid(error: &anyhow::Error) -> bool {
+    anyhow_error_has_sqlite_code(error, &[11, 26])
+}
+
+fn anyhow_error_has_sqlite_code(error: &anyhow::Error, codes: &[i32]) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<sqlx::Error>()
+            .is_some_and(|error| sqlite_error_has_code(error, codes))
+    })
 }
 
 #[cfg(unix)]
@@ -588,8 +1007,14 @@ fn sync_parent(_directory: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn migrate_exclusively(connection: &mut SqliteConnection) -> Result<()> {
+async fn migrate_exclusively(
+    connection: &mut SqliteConnection,
+    account_subject: Option<&str>,
+) -> Result<()> {
     acquire_exclusive_lock(connection).await?;
+    if let Some(account_subject) = account_subject {
+        verify_account_identity_connection(connection, account_subject).await?;
+    }
     validate_migration_state(connection).await?;
     MIGRATOR
         .run_direct(connection)
@@ -889,12 +1314,31 @@ mod tests {
         open.database.pool.close().await;
     }
 
-    fn count_files_with_suffix(directory: &Path, suffix: &str) -> Result<usize> {
-        Ok(directory
+    fn prepare_test_data(directory: &TempDir) -> Result<PathBuf> {
+        let runtime_directory = validate_runtime_directory(directory.path())?;
+        prepare_data_directory(&runtime_directory)
+    }
+
+    fn backup_directories(data_directory: &Path, kind: &str) -> Result<Vec<PathBuf>> {
+        let mut paths = data_directory
             .read_dir()?
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(suffix))
-            .count())
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.retain(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&format!("{kind}-")))
+        });
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn only_backup_directory(data_directory: &Path, kind: &str) -> Result<PathBuf> {
+        let backups = backup_directories(data_directory, kind)?;
+        if backups.len() != 1 {
+            bail!("expected one {kind} directory, found {}", backups.len());
+        }
+        Ok(backups[0].clone())
     }
 
     #[tokio::test]
@@ -903,6 +1347,11 @@ mod tests {
         let subject_a = "stable-subject-a";
         let subject_b = "stable-subject-b";
         let first = Database::open_account(directory.path(), subject_a).await?;
+        let data_directory = directory.path().join(DATA_DIRECTORY_NAME);
+        assert_eq!(
+            account_database_path(directory.path(), subject_a).parent(),
+            Some(data_directory.as_path())
+        );
         sqlx::query("INSERT INTO labels (id, name, type) VALUES ('INBOX', 'Inbox', 'system')")
             .execute(&first.database.pool)
             .await?;
@@ -939,6 +1388,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_rejects_non_directory_runtime_and_non_regular_artifacts() -> Result<()> {
+        let runtime_parent = tempfile::tempdir()?;
+        let runtime_file = runtime_parent.path().join("runtime-file");
+        File::create(&runtime_file)?;
+        assert!(
+            Database::open_account(&runtime_file, "stable-subject-a")
+                .await
+                .expect_err("file runtime root was accepted")
+                .to_string()
+                .contains("real directory")
+        );
+
+        for artifact_index in 0..=database_artifacts(Path::new("gtui.db")).len() {
+            let directory = tempfile::tempdir()?;
+            prepare_test_data(&directory)?;
+            let database_path = account_database_path(directory.path(), "stable-subject-a");
+            let artifact = if artifact_index == database_artifacts(&database_path).len() {
+                database_path.with_extension("lock")
+            } else {
+                database_artifacts(&database_path)[artifact_index].clone()
+            };
+            std::fs::create_dir(&artifact)?;
+
+            let error = Database::open_account(directory.path(), "stable-subject-a")
+                .await
+                .expect_err("non-regular account artifact was accepted");
+            assert!(error.to_string().contains("regular file"));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_rejects_symlinked_runtime_data_and_artifact_paths() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let runtime_target = tempfile::tempdir()?;
+        let runtime_parent = tempfile::tempdir()?;
+        let runtime_link = runtime_parent.path().join("runtime-link");
+        symlink(runtime_target.path(), &runtime_link)?;
+        assert!(
+            Database::open_account(&runtime_link, "stable-subject-a")
+                .await
+                .expect_err("symlinked runtime root was accepted")
+                .to_string()
+                .contains("real directory")
+        );
+        assert!(
+            !runtime_target
+                .path()
+                .join(DATA_DIRECTORY_NAME)
+                .try_exists()?
+        );
+
+        let data_runtime = tempfile::tempdir()?;
+        let data_target = tempfile::tempdir()?;
+        symlink(
+            data_target.path(),
+            data_runtime.path().join(DATA_DIRECTORY_NAME),
+        )?;
+        assert!(
+            Database::open_account(data_runtime.path(), "stable-subject-a")
+                .await
+                .expect_err("symlinked data directory was accepted")
+                .to_string()
+                .contains("real directory")
+        );
+
+        for artifact_index in 0..=database_artifacts(Path::new("gtui.db")).len() {
+            let directory = tempfile::tempdir()?;
+            prepare_test_data(&directory)?;
+            let database_path = account_database_path(directory.path(), "stable-subject-a");
+            let artifact = if artifact_index == database_artifacts(&database_path).len() {
+                database_path.with_extension("lock")
+            } else {
+                database_artifacts(&database_path)[artifact_index].clone()
+            };
+            let target = directory.path().join(format!("target-{artifact_index}"));
+            std::fs::write(&target, b"must remain untouched")?;
+            symlink(&target, &artifact)?;
+
+            let error = Database::open_account(directory.path(), "stable-subject-a")
+                .await
+                .expect_err("symlinked account artifact was accepted");
+            assert!(error.to_string().contains("regular file"));
+            assert_eq!(std::fs::read(target)?, b"must remain untouched");
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_rejects_unsafe_runtime_and_data_permissions() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unsafe_runtime = tempfile::tempdir()?;
+        std::fs::set_permissions(
+            unsafe_runtime.path(),
+            std::fs::Permissions::from_mode(0o770),
+        )?;
+        let error = Database::open_account(unsafe_runtime.path(), "stable-subject-a")
+            .await
+            .expect_err("group-writable runtime root was accepted");
+        assert!(error.to_string().contains("must not be writable"));
+
+        let unsafe_data = tempfile::tempdir()?;
+        let data_directory = prepare_test_data(&unsafe_data)?;
+        std::fs::set_permissions(&data_directory, std::fs::Permissions::from_mode(0o750))?;
+        let error = Database::open_account(unsafe_data.path(), "stable-subject-a")
+            .await
+            .expect_err("non-private data directory was accepted");
+        assert!(error.to_string().contains("owner-only"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn account_creates_owner_private_data_directory() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir()?;
+        let opened = Database::open_account(directory.path(), "stable-subject-a").await?;
+        let data_directory = directory.path().join(DATA_DIRECTORY_NAME);
+        let metadata = std::fs::symlink_metadata(&data_directory)?;
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(
+            account_database_path(directory.path(), "stable-subject-a").parent(),
+            Some(data_directory.as_path())
+        );
+        close_account(opened).await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn account_filename_identity_mismatch_is_quarantined() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let subject_a = "stable-subject-a";
@@ -955,7 +1540,9 @@ mod tests {
 
         assert!(error.to_string().contains("identity verification failed"));
         assert!(!path_b.try_exists()?);
-        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 3);
+        let data_directory = directory.path().join(DATA_DIRECTORY_NAME);
+        let backup = only_backup_directory(&data_directory, "quarantine")?;
+        assert!(backup.join(path_b.file_name().unwrap()).is_file());
         Ok(())
     }
 
@@ -963,6 +1550,7 @@ mod tests {
     async fn account_ownerless_database_is_quarantined_not_claimed() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let subject = "stable-subject-a";
+        let data_directory = prepare_test_data(&directory)?;
         let path = account_database_path(directory.path(), subject);
         let ownerless = Database::new(&format!("sqlite://{}", path.display())).await?;
         ownerless.run_migrations().await?;
@@ -974,7 +1562,39 @@ mod tests {
                 .is_err()
         );
         assert!(!path.try_exists()?);
-        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        assert_eq!(backup_directories(&data_directory, "quarantine")?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_owner_verification_precedes_migration_schema_writes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let subject = "stable-subject-a";
+        let data_directory = prepare_test_data(&directory)?;
+        let path = account_database_path(directory.path(), subject);
+        let ownerless = Database::new(&format!("sqlite://{}", path.display())).await?;
+        initialize_v0(&ownerless).await?;
+        ownerless.pool.close().await;
+
+        let error = Database::open_account(directory.path(), subject)
+            .await
+            .expect_err("ownerless cache was migrated before identity verification");
+        assert!(error.to_string().contains("identity verification failed"));
+
+        let backup = only_backup_directory(&data_directory, "quarantine")?;
+        let quarantined = backup.join(path.file_name().unwrap());
+        let options = SqliteConnectOptions::new()
+            .filename(quarantined)
+            .read_only(true);
+        let pool = SqlitePool::connect_with(options).await?;
+        let schema_writes = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE name IN ('_sqlx_migrations', 'account_identity')",
+        )
+        .fetch_one(&pool)
+        .await?;
+        pool.close().await;
+        assert_eq!(schema_writes, 0);
         Ok(())
     }
 
@@ -982,6 +1602,7 @@ mod tests {
     async fn account_duplicate_identity_database_is_quarantined() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let subject = "stable-subject-a";
+        let data_directory = prepare_test_data(&directory)?;
         let path = account_database_path(directory.path(), subject);
         let options = SqliteConnectOptions::new()
             .filename(&path)
@@ -1003,7 +1624,7 @@ mod tests {
                 .is_err()
         );
         assert!(!path.try_exists()?);
-        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        assert_eq!(backup_directories(&data_directory, "quarantine")?.len(), 1);
         Ok(())
     }
 
@@ -1011,6 +1632,7 @@ mod tests {
     async fn account_malformed_database_is_quarantined() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let subject = "stable-subject-a";
+        let data_directory = prepare_test_data(&directory)?;
         let path = account_database_path(directory.path(), subject);
         std::fs::write(&path, b"fake malformed sqlite fixture")?;
 
@@ -1020,7 +1642,7 @@ mod tests {
                 .is_err()
         );
         assert!(!path.try_exists()?);
-        assert_eq!(count_files_with_suffix(directory.path(), ".quarantine")?, 1);
+        assert_eq!(backup_directories(&data_directory, "quarantine")?.len(), 1);
         Ok(())
     }
 
@@ -1043,33 +1665,135 @@ mod tests {
                 .is_err()
         );
         assert!(!path.try_exists()?);
-        assert!(count_files_with_suffix(directory.path(), ".quarantine")? >= 1);
+        assert_eq!(
+            backup_directories(&directory.path().join(DATA_DIRECTORY_NAME), "quarantine")?.len(),
+            1
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn account_legacy_nonempty_database_and_sidecars_are_backed_up() -> Result<()> {
+    async fn account_legacy_quarantine_preserves_basenames_and_journal() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let legacy = directory.path().join(LEGACY_DATABASE_NAME);
-        for artifact in database_artifacts(&legacy) {
-            std::fs::write(artifact, b"fake legacy cache fixture")?;
+        for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
+            std::fs::write(artifact, format!("legacy artifact {index}"))?;
         }
-        let existing_backup = directory.path().join("gtui.db.0.unowned-backup");
-        std::fs::write(&existing_backup, b"fake existing backup fixture")?;
 
         let opened = Database::open_account(directory.path(), "stable-subject-a").await?;
 
         assert!(opened.legacy_quarantined);
         assert!(existing_database_artifacts(&legacy)?.is_empty());
-        assert_eq!(
-            std::fs::read(existing_backup)?,
-            b"fake existing backup fixture"
-        );
-        assert_eq!(
-            count_files_with_suffix(directory.path(), ".unowned-backup")?,
-            4
-        );
+        let data_directory = directory.path().join(DATA_DIRECTORY_NAME);
+        let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::symlink_metadata(&backup)?.mode() & 0o777, 0o700);
+        }
+        for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
+            let name = artifact.file_name().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(backup.join(name))?,
+                format!("legacy artifact {index}")
+            );
+        }
+        assert!(!backup.join(QUARANTINE_MARKER_NAME).try_exists()?);
         close_account(opened).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_quarantine_recovers_every_rename_crash_point() -> Result<()> {
+        for stop_after_moves in 0..=database_artifacts(Path::new("gtui.db")).len() {
+            let directory = tempfile::tempdir()?;
+            let runtime_directory = validate_runtime_directory(directory.path())?;
+            let data_directory = prepare_data_directory(&runtime_directory)?;
+            let legacy = runtime_directory.join(LEGACY_DATABASE_NAME);
+            for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
+                std::fs::write(artifact, format!("artifact {index}"))?;
+            }
+
+            let error = start_quarantine(
+                &legacy,
+                &data_directory,
+                "unowned-backup",
+                Some(stop_after_moves),
+            )
+            .await
+            .expect_err("quarantine crash was not injected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected quarantine interruption")
+            );
+
+            recover_quarantines(&runtime_directory, &data_directory).await?;
+            assert!(existing_database_artifacts(&legacy)?.is_empty());
+            let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+            for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(backup.join(artifact.file_name().unwrap()))?,
+                    format!("artifact {index}")
+                );
+            }
+            assert!(!backup.join(QUARANTINE_MARKER_NAME).try_exists()?);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_quarantine_recovery_never_overwrites() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let runtime_directory = validate_runtime_directory(directory.path())?;
+        let data_directory = prepare_data_directory(&runtime_directory)?;
+        let legacy = runtime_directory.join(LEGACY_DATABASE_NAME);
+        std::fs::write(&legacy, b"original")?;
+
+        start_quarantine(&legacy, &data_directory, "unowned-backup", Some(1))
+            .await
+            .expect_err("quarantine crash was not injected");
+        std::fs::write(&legacy, b"replacement")?;
+
+        let error = recover_quarantines(&runtime_directory, &data_directory)
+            .await
+            .expect_err("quarantine recovery overwrote an artifact");
+        assert!(error.to_string().contains("refused to overwrite"));
+        let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+        assert_eq!(
+            std::fs::read(backup.join(LEGACY_DATABASE_NAME))?,
+            b"original"
+        );
+        assert_eq!(std::fs::read(legacy)?, b"replacement");
+        assert!(backup.join(QUARANTINE_MARKER_NAME).is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_legacy_busy_sqlite_is_not_quarantined() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let legacy_url = temporary_database_url(&directory);
+        let legacy = Database::new(&legacy_url).await?;
+        legacy.run_migrations().await?;
+        let mut writer = legacy.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
+
+        let error = Database::open_account(directory.path(), "stable-subject-a")
+            .await
+            .expect_err("busy legacy cache was moved");
+        assert!(format!("{error:#}").contains("cache is busy"));
+        assert!(directory.path().join(LEGACY_DATABASE_NAME).is_file());
+        assert!(
+            backup_directories(
+                &directory.path().join(DATA_DIRECTORY_NAME),
+                "unowned-backup"
+            )?
+            .is_empty()
+        );
+
+        sqlx::query("ROLLBACK").execute(&mut *writer).await?;
+        drop(writer);
+        legacy.pool.close().await;
         Ok(())
     }
 
@@ -1100,6 +1824,83 @@ mod tests {
         assert!(error.to_string().contains("account already open"));
         close_account(first).await;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_lease_child_process() -> Result<()> {
+        let Some(directory) = std::env::var_os("GTUI_TEST_LEASE_DIRECTORY") else {
+            return Ok(());
+        };
+        let ready = std::env::var_os("GTUI_TEST_LEASE_READY")
+            .context("child lease test has no readiness path")?;
+        let stop = std::env::var_os("GTUI_TEST_LEASE_STOP")
+            .context("child lease test has no stop path")?;
+        let opened = Database::open_account(PathBuf::from(directory), "stable-subject-a").await?;
+        File::create(ready)?.sync_all()?;
+
+        for _ in 0..1_000 {
+            if std::fs::symlink_metadata(&stop).is_ok() {
+                close_account(opened).await;
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        bail!("child lease test timed out waiting for its stop signal")
+    }
+
+    #[tokio::test]
+    async fn account_lease_rejects_independent_process() -> Result<()> {
+        use std::process::Command;
+
+        let directory = tempfile::tempdir()?;
+        let ready = directory.path().join("child-ready");
+        let stop = directory.path().join("child-stop");
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg("db::tests::account_lease_child_process")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("GTUI_TEST_LEASE_DIRECTORY", directory.path())
+            .env("GTUI_TEST_LEASE_READY", &ready)
+            .env("GTUI_TEST_LEASE_STOP", &stop)
+            .spawn()
+            .context("failed to spawn child lease holder")?;
+
+        let mut child_ready = false;
+        for _ in 0..1_000 {
+            if std::fs::symlink_metadata(&ready).is_ok() {
+                child_ready = true;
+                break;
+            }
+            if child.try_wait()?.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let parent_check = async {
+            if !child_ready {
+                bail!("child lease holder did not signal readiness");
+            }
+            let error = match Database::open_account(directory.path(), "stable-subject-a").await {
+                Ok(opened) => {
+                    close_account(opened).await;
+                    bail!("parent acquired a lease held by a child process");
+                }
+                Err(error) => error,
+            };
+            if !error.to_string().contains("account already open") {
+                bail!("unexpected second-process lease error: {error:#}");
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        File::create(&stop)?.sync_all()?;
+        let status = child.wait().context("failed to join child lease holder")?;
+        if !status.success() {
+            bail!("child lease holder exited unsuccessfully: {status}");
+        }
+        parent_check
     }
 
     #[tokio::test]
