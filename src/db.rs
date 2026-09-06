@@ -24,6 +24,10 @@ const LEGACY_LEASE_NAME: &str = ".legacy-quarantine.lock";
 const QUARANTINE_MARKER_NAME: &str = ".quarantine-in-progress";
 const QUARANTINE_MARKER_TEMP_NAME: &str = ".quarantine-in-progress.tmp";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+#[cfg(test)]
+const OPAQUE_QUARANTINE_STAGES_PER_ARTIFACT: usize = 8;
+#[cfg(test)]
+const OPAQUE_DESTINATION_DURABLE_STAGE: usize = 6;
 
 type SchemaObject = (String, String, String, Option<String>);
 type LedgerRow = (i64, i64, Vec<u8>);
@@ -904,6 +908,12 @@ fn validate_regular_metadata(
             bail!("{description} must have exactly one filesystem link");
         }
     }
+    #[cfg(windows)]
+    {
+        let _ = private_directory;
+        // Rust's std APIs expose no equivalent hard-link/handle identity check on Windows. This
+        // boundary trusts the same OS user and the LocalAppData ACL; keep the Unix nlink check.
+    }
     Ok(())
 }
 
@@ -1279,53 +1289,96 @@ async fn sqlite_database_is_valid(database_path: &Path, data_directory: &Path) -
     if !has_sqlite_header(database_path, data_directory)? {
         return Ok(false);
     }
-    let (mut source, source_metadata) =
-        open_regular_file(database_path, "SQLite cache artifact", data_directory)?;
-    let mut temporary = tempfile::Builder::new()
+    let temporary_directory = tempfile::Builder::new()
         .prefix(".sqlite-classification-")
-        .suffix(".db.tmp")
-        .tempfile_in(data_directory)
-        .context("failed to create temporary SQLite classification copy")?;
-    validate_temporary_file(
-        temporary.path(),
-        temporary.as_file(),
-        data_directory,
-        "temporary SQLite classification copy",
+        .tempdir_in(data_directory)
+        .context("failed to create temporary SQLite classification directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            temporary_directory.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .context("failed to secure temporary SQLite classification directory")?;
+    }
+    validate_private_directory(
+        temporary_directory.path(),
+        "temporary SQLite classification directory",
     )?;
-    std::io::copy(&mut source, temporary.as_file_mut())
-        .context("failed to copy SQLite cache for classification")?;
-    temporary
-        .as_file_mut()
-        .flush()
-        .context("failed to flush SQLite classification copy")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("failed to sync SQLite classification copy")?;
-    validate_path_identity(
-        database_path,
-        &source_metadata,
-        "SQLite cache artifact",
+    validate_directory_owner(
+        temporary_directory.path(),
         data_directory,
+        "temporary SQLite classification directory",
     )?;
-    drop(source);
+    let sources = existing_database_artifacts(database_path, data_directory)?;
+    let source_fingerprints = sources
+        .iter()
+        .map(|source| fingerprint_file(source, "SQLite cache artifact", data_directory))
+        .collect::<Result<Vec<_>>>()?;
+    for (source_path, source_fingerprint) in sources.iter().zip(&source_fingerprints) {
+        let (mut source, source_metadata) =
+            open_regular_file(source_path, "SQLite cache artifact", data_directory)?;
+        let destination = temporary_directory.path().join(
+            source_path
+                .file_name()
+                .context("SQLite cache artifact has no file name")?,
+        );
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut copy = options
+            .open(&destination)
+            .context("failed to create temporary SQLite classification artifact")?;
+        std::io::copy(&mut source, &mut copy)
+            .context("failed to copy SQLite artifact for classification")?;
+        copy.sync_all()
+            .context("failed to sync SQLite classification artifact")?;
+        validate_path_identity(
+            source_path,
+            &source_metadata,
+            "SQLite cache artifact",
+            data_directory,
+        )?;
+        if fingerprint_file(
+            &destination,
+            "temporary SQLite classification artifact",
+            data_directory,
+        )? != *source_fingerprint
+        {
+            return Err(QuarantineSourceChanged.into());
+        }
+    }
+    for (source, fingerprint) in sources.iter().zip(source_fingerprints) {
+        if fingerprint_file(source, "SQLite cache artifact", data_directory)? != fingerprint {
+            return Err(QuarantineSourceChanged.into());
+        }
+    }
+    let temporary_database = temporary_directory.path().join(
+        database_path
+            .file_name()
+            .context("SQLite cache has no file name")?,
+    );
     let options = SqliteConnectOptions::new()
-        .filename(temporary.path())
-        .read_only(true)
-        .immutable(true);
+        .filename(temporary_database)
+        .create_if_missing(false);
     let mut connection = match SqliteConnection::connect_with(&options).await {
         Ok(connection) => connection,
         Err(error) if sqlite_error_is_invalid(&error) => return Ok(false),
         Err(error) => return Err(error).context("failed to validate SQLite cache"),
     };
-    let validation = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_schema")
-        .fetch_one(&mut connection)
+    let validation = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
+        .fetch_all(&mut connection)
         .await;
     let close = connection.close().await;
     match validation {
-        Ok(_) => {
+        Ok(rows) => {
             close.context("failed to close validated SQLite cache")?;
-            Ok(true)
+            Ok(rows.as_slice() == ["ok"])
         }
         Err(error) if sqlite_error_is_invalid(&error) => Ok(false),
         Err(error) => Err(error).context("failed to validate SQLite cache contents"),
@@ -1735,16 +1788,21 @@ fn resume_opaque_quarantine(
     backup_directory: &Path,
     marker: &QuarantineMarker,
     data_directory: &Path,
-    stop_after_moves: Option<usize>,
+    stop_after_stage: Option<usize>,
 ) -> Result<bool> {
-    if stop_after_moves == Some(0) {
-        bail!("injected quarantine interruption");
-    }
+    let mut completed_stage = 0;
+    let mut checkpoint = || {
+        if stop_after_stage == Some(completed_stage) {
+            bail!("injected quarantine interruption");
+        }
+        completed_stage += 1;
+        Ok(())
+    };
+    checkpoint()?;
     let source_directory = marker
         .source_database
         .parent()
         .context("quarantine marker source has no parent directory")?;
-    let mut moved = 0;
     let mut source_changed = false;
 
     for source in database_artifacts(&marker.source_database) {
@@ -1774,95 +1832,147 @@ fn resume_opaque_quarantine(
             continue;
         };
 
-        let destination_matches = if destination_exists {
+        if destination_exists
+            && fingerprint_file(
+                &destination,
+                "quarantined opaque cache artifact",
+                data_directory,
+            )? != record.fingerprint
+        {
+            bail!("quarantined opaque cache artifact does not match its marker");
+        }
+        let source_matches = source_exists
+            && fingerprint_file(&source, "opaque cache artifact", data_directory)?
+                == record.fingerprint;
+
+        if !source_exists && !destination_exists {
+            bail!("cache quarantine recovery found neither source nor destination artifact");
+        }
+        if source_exists && !source_matches {
+            if destination_exists {
+                source_changed = true;
+                continue;
+            }
+            abandon_quarantine_marker(backup_directory, data_directory)?;
+            return Ok(true);
+        }
+
+        if !destination_exists {
+            let (mut source_file, source_metadata) =
+                open_regular_file(&source, "opaque cache artifact", data_directory)?;
+            let mut temporary = tempfile::Builder::new()
+                .prefix(".opaque-backup-")
+                .suffix(".tmp")
+                .tempfile_in(backup_directory)
+                .context("failed to create temporary opaque cache backup")?;
+            let temporary_metadata = validate_temporary_file(
+                temporary.path(),
+                temporary.as_file(),
+                data_directory,
+                "temporary opaque cache backup",
+            )?;
+            checkpoint()?;
+            std::io::copy(&mut source_file, temporary.as_file_mut())
+                .context("failed to copy opaque cache backup")?;
+            checkpoint()?;
+            temporary
+                .as_file()
+                .sync_all()
+                .context("failed to sync temporary opaque cache backup")?;
+            checkpoint()?;
+            validate_path_identity(
+                &source,
+                &source_metadata,
+                "opaque cache artifact",
+                data_directory,
+            )?;
+            if fingerprint_file(
+                temporary.path(),
+                "temporary opaque cache backup",
+                data_directory,
+            )? != record.fingerprint
+            {
+                drop(source_file);
+                drop(temporary);
+                abandon_quarantine_marker(backup_directory, data_directory)?;
+                return Ok(true);
+            }
+            checkpoint()?;
+
+            match temporary.persist_noclobber(&destination) {
+                Ok(file) => {
+                    let installed = validate_regular_file_if_present(
+                        &destination,
+                        "quarantined opaque cache artifact",
+                        data_directory,
+                    )?
+                    .context("quarantined opaque cache artifact disappeared after installation")?;
+                    validate_opened_file_identity(
+                        &destination,
+                        &file,
+                        Some(&temporary_metadata),
+                        &installed,
+                        "quarantined opaque cache artifact",
+                    )?;
+                    file.sync_all()
+                        .context("failed to sync installed opaque cache backup")?;
+                }
+                Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+                    drop(error.file);
+                }
+                Err(error) => {
+                    return Err(error.error).context("failed to install opaque cache backup");
+                }
+            }
             if fingerprint_file(
                 &destination,
                 "quarantined opaque cache artifact",
                 data_directory,
             )? != record.fingerprint
             {
-                bail!("quarantined opaque cache artifact does not match its marker");
+                bail!("installed opaque cache artifact does not match its marker");
             }
-            true
-        } else {
-            false
-        };
-        let source_matches = if source_exists {
-            fingerprint_file(&source, "opaque cache artifact", data_directory)?
-                == record.fingerprint
-        } else {
-            false
-        };
+            checkpoint()?;
+        }
 
-        match (source_exists, destination_matches) {
-            (true, false) if source_matches => {
-                let (file, source_metadata) =
-                    open_regular_file(&source, "opaque cache artifact", data_directory)?;
-                file.sync_all()
-                    .context("failed to sync opaque cache artifact before quarantine")?;
-                validate_path_identity(
-                    &source,
-                    &source_metadata,
-                    "opaque cache artifact",
-                    data_directory,
-                )?;
-                drop(file);
-                std::fs::rename(&source, &destination)
-                    .context("failed to stage opaque cache artifact in quarantine")?;
-                if fingerprint_file(
-                    &destination,
-                    "quarantined opaque cache artifact",
-                    data_directory,
-                )? != record.fingerprint
-                {
-                    bail!("staged opaque cache artifact does not match its marker");
-                }
-                let (file, _) = open_regular_file(
-                    &destination,
-                    "quarantined opaque cache artifact",
-                    data_directory,
-                )?;
-                file.sync_all()
-                    .context("failed to sync quarantined opaque cache artifact")?;
-                sync_parent(backup_directory)?;
-                sync_parent(source_directory)?;
-                moved += 1;
-                if stop_after_moves == Some(moved) {
-                    bail!("injected quarantine interruption");
-                }
-            }
-            (true, false) => {
-                abandon_quarantine_marker(backup_directory, data_directory)?;
-                return Ok(true);
-            }
-            (false, true) => {
-                let (file, _) = open_regular_file(
-                    &destination,
-                    "quarantined opaque cache artifact",
-                    data_directory,
-                )?;
-                file.sync_all()
-                    .context("failed to resync quarantined opaque cache artifact")?;
-                sync_parent(backup_directory)?;
-                sync_parent(source_directory)?;
-            }
-            (true, true) if source_matches => {
-                let (file, _) = open_regular_file(
-                    &destination,
-                    "quarantined opaque cache artifact",
-                    data_directory,
-                )?;
-                file.sync_all()
-                    .context("failed to sync duplicate opaque cache artifact")?;
-                sync_parent(backup_directory)?;
-                std::fs::remove_file(&source)
-                    .context("failed to remove verified duplicate opaque cache artifact")?;
-                sync_parent(source_directory)?;
-            }
-            (true, true) => source_changed = true,
-            (false, false) => {
-                bail!("cache quarantine recovery found neither source nor destination artifact")
-            }
+        let (destination_file, _) = open_regular_file(
+            &destination,
+            "quarantined opaque cache artifact",
+            data_directory,
+        )?;
+        destination_file
+            .sync_all()
+            .context("failed to sync quarantined opaque cache artifact")?;
+        if fingerprint_file(
+            &destination,
+            "quarantined opaque cache artifact",
+            data_directory,
+        )? != record.fingerprint
+        {
+            bail!("quarantined opaque cache artifact changed before becoming durable");
+        }
+        sync_parent(backup_directory)?;
+        if !destination_exists {
+            checkpoint()?;
+        }
+
+        if !source_exists {
+            sync_parent(source_directory)?;
+            continue;
+        }
+        if fingerprint_file(&source, "opaque cache artifact", data_directory)? != record.fingerprint
+        {
+            source_changed = true;
+            continue;
+        }
+        std::fs::remove_file(&source)
+            .context("failed to remove durably backed-up opaque cache artifact")?;
+        if !destination_exists {
+            checkpoint()?;
+        }
+        sync_parent(source_directory)?;
+        if !destination_exists {
+            checkpoint()?;
         }
     }
 
@@ -2295,6 +2405,62 @@ mod tests {
         Ok(())
     }
 
+    async fn create_integrity_corrupt_sqlite_fixture(path: &Path) -> Result<Vec<u8>> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let mut connection = SqliteConnection::connect_with(&options).await?;
+        sqlx::query(
+            "PRAGMA page_size = 512;
+             VACUUM;
+             CREATE TABLE legacy_rows (value BLOB NOT NULL);
+             WITH RECURSIVE rows(value) AS (
+                 VALUES(1)
+                 UNION ALL
+                 SELECT value + 1 FROM rows WHERE value < 100
+             )
+             INSERT INTO legacy_rows SELECT zeroblob(100) FROM rows;",
+        )
+        .execute(&mut connection)
+        .await?;
+        let root_page = sqlx::query_scalar::<_, i64>(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'legacy_rows'",
+        )
+        .fetch_one(&mut connection)
+        .await? as usize;
+        connection.close().await?;
+
+        let mut bytes = std::fs::read(path)?;
+        let page_size = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+        let root_offset = (root_page - 1) * page_size;
+        assert_eq!(
+            bytes[root_offset], 5,
+            "fixture root is not an interior page"
+        );
+        let cell_offset =
+            u16::from_be_bytes([bytes[root_offset + 12], bytes[root_offset + 13]]) as usize;
+        let child_page = u32::from_be_bytes(
+            bytes[root_offset + cell_offset..root_offset + cell_offset + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let child_offset = (child_page - 1) * page_size;
+        assert_eq!(bytes[child_offset], 13, "fixture child is not a leaf page");
+        bytes[child_offset + 3..child_offset + 5].copy_from_slice(&[0, 0]);
+        std::fs::write(path, &bytes)?;
+
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .read_only(true)
+            .immutable(true);
+        let mut connection = SqliteConnection::connect_with(&options).await?;
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_schema")
+            .fetch_one(&mut connection)
+            .await?;
+        connection.close().await?;
+        Ok(bytes)
+    }
+
     async fn assert_standalone_backup(path: &Path, data_directory: &Path, rows: i64) -> Result<()> {
         validate_sqlite_integrity(path, data_directory).await?;
         for sidecar in database_artifacts(path).into_iter().skip(1) {
@@ -2507,7 +2673,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn account_rejects_multi_link_database_lease_and_legacy_artifacts() -> Result<()> {
+    async fn account_unix_rejects_multi_link_database_lease_and_legacy_artifacts() -> Result<()> {
         for artifact_kind in ["database", "lease", "legacy"] {
             let data_root = tempfile::tempdir()?;
             let legacy_root = tempfile::tempdir()?;
@@ -2536,6 +2702,22 @@ mod tests {
             assert_eq!(std::fs::read(&artifact)?, b"same-user hard-link fixture");
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn account_windows_hard_links_use_same_user_acl_boundary() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source");
+        let second_link = directory.path().join("second-link");
+        std::fs::write(&source, b"same-user hard-link fixture")?;
+        std::fs::hard_link(&source, second_link)?;
+
+        validate_regular_metadata(
+            &std::fs::symlink_metadata(source)?,
+            "Windows cache artifact",
+            directory.path(),
+        )
     }
 
     #[cfg(unix)]
@@ -2896,6 +3078,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_legacy_integrity_corruption_is_preserved_opaquely() -> Result<()> {
+        let data_root = tempfile::tempdir()?;
+        let legacy_root = tempfile::tempdir()?;
+        let legacy = legacy_root.path().join(LEGACY_DATABASE_NAME);
+        let corrupt = create_integrity_corrupt_sqlite_fixture(&legacy).await?;
+
+        let opened =
+            Database::open_account(data_root.path(), legacy_root.path(), "stable-subject-a")
+                .await?;
+
+        assert!(opened.legacy_quarantined);
+        assert!(!legacy.try_exists()?);
+        let data_directory = data_root.path().join(APPLICATION_DIRECTORY_NAME);
+        let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+        assert_eq!(std::fs::read(backup.join(LEGACY_DATABASE_NAME))?, corrupt);
+        assert!(!backup.join(QUARANTINE_MARKER_NAME).try_exists()?);
+        close_account(opened).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn account_corrupt_standalone_recovery_falls_back_to_opaque() -> Result<()> {
+        let data_root = tempfile::tempdir()?;
+        let legacy_root_directory = tempfile::tempdir()?;
+        let legacy_root =
+            validate_root_directory(legacy_root_directory.path(), "legacy cache root")?;
+        let data_directory = prepare_test_data(&data_root)?;
+        let legacy = legacy_root.join(LEGACY_DATABASE_NAME);
+        let corrupt = create_integrity_corrupt_sqlite_fixture(&legacy).await?;
+        let sources = existing_database_artifacts(&legacy, &data_directory)?;
+        let stale_backup = create_private_backup_directory(&data_directory, "unowned-backup")?;
+        let marker = quarantine_marker(
+            &legacy,
+            QuarantineKind::StandaloneSqlite,
+            &sources,
+            &data_directory,
+        )?;
+        write_quarantine_marker(&stale_backup, &marker, &data_directory)?;
+
+        recover_quarantines(&legacy_root, &data_directory).await?;
+
+        assert!(!legacy.try_exists()?);
+        let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+        assert_eq!(std::fs::read(backup.join(LEGACY_DATABASE_NAME))?, corrupt);
+        assert!(!backup.join(QUARANTINE_MARKER_NAME).try_exists()?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn account_legacy_hot_wal_becomes_standalone_backup() -> Result<()> {
         let data_root = tempfile::tempdir()?;
         let legacy_root = tempfile::tempdir()?;
@@ -2999,11 +3230,17 @@ mod tests {
         let data_directory = prepare_data_directory(&legacy_root)?;
         let legacy = legacy_root.join(LEGACY_DATABASE_NAME);
         std::fs::write(&legacy, b"opaque duplicate")?;
-        start_quarantine(&legacy, &data_directory, "unowned-backup", Some(1))
-            .await
-            .expect_err("opaque quarantine crash was not injected");
+        start_quarantine(
+            &legacy,
+            &data_directory,
+            "unowned-backup",
+            Some(OPAQUE_DESTINATION_DURABLE_STAGE),
+        )
+        .await
+        .expect_err("opaque quarantine crash was not injected");
         let backup = only_backup_directory(&data_directory, "unowned-backup")?;
-        std::fs::copy(backup.join(LEGACY_DATABASE_NAME), &legacy)?;
+        assert!(legacy.is_file());
+        assert!(backup.join(LEGACY_DATABASE_NAME).is_file());
 
         recover_quarantines(&legacy_root, &data_directory).await?;
 
@@ -3045,11 +3282,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_quarantine_recovers_every_rename_crash_point() -> Result<()> {
-        for stop_after_moves in 0..=database_artifacts(Path::new("gtui.db")).len() {
-            let directory = tempfile::tempdir()?;
-            let legacy_root = validate_root_directory(directory.path(), "legacy cache root")?;
-            let data_directory = prepare_data_directory(&legacy_root)?;
+    async fn account_opaque_quarantine_recovers_every_copy_boundary() -> Result<()> {
+        let artifact_count = database_artifacts(Path::new("gtui.db")).len();
+        for stop_after_stage in 0..=artifact_count * OPAQUE_QUARANTINE_STAGES_PER_ARTIFACT {
+            let data_root = tempfile::tempdir()?;
+            let legacy_root_directory = tempfile::tempdir()?;
+            let legacy_root =
+                validate_root_directory(legacy_root_directory.path(), "legacy cache root")?;
+            let data_directory = prepare_test_data(&data_root)?;
             let legacy = legacy_root.join(LEGACY_DATABASE_NAME);
             for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
                 std::fs::write(artifact, format!("artifact {index}"))?;
@@ -3059,7 +3299,7 @@ mod tests {
                 &legacy,
                 &data_directory,
                 "unowned-backup",
-                Some(stop_after_moves),
+                Some(stop_after_stage),
             )
             .await
             .expect_err("quarantine crash was not injected");
@@ -3069,9 +3309,37 @@ mod tests {
                     .contains("injected quarantine interruption")
             );
 
+            let backup = only_backup_directory(&data_directory, "unowned-backup")?;
+            for (index, source) in database_artifacts(&legacy).into_iter().enumerate() {
+                let destination = backup.join(source.file_name().unwrap());
+                let install_stage = index * OPAQUE_QUARANTINE_STAGES_PER_ARTIFACT + 5;
+                let removal_stage = index * OPAQUE_QUARANTINE_STAGES_PER_ARTIFACT + 7;
+                assert_eq!(
+                    source.try_exists()?,
+                    stop_after_stage < removal_stage,
+                    "source state at stage {stop_after_stage} for artifact {index}"
+                );
+                assert_eq!(
+                    destination.try_exists()?,
+                    stop_after_stage >= install_stage,
+                    "destination state at stage {stop_after_stage} for artifact {index}"
+                );
+                if source.try_exists()? {
+                    assert_eq!(
+                        std::fs::read_to_string(&source)?,
+                        format!("artifact {index}")
+                    );
+                }
+                if destination.try_exists()? {
+                    assert_eq!(
+                        std::fs::read_to_string(&destination)?,
+                        format!("artifact {index}")
+                    );
+                }
+            }
+
             recover_quarantines(&legacy_root, &data_directory).await?;
             assert!(existing_database_artifacts(&legacy, &data_directory)?.is_empty());
-            let backup = only_backup_directory(&data_directory, "unowned-backup")?;
             for (index, artifact) in database_artifacts(&legacy).into_iter().enumerate() {
                 assert_eq!(
                     std::fs::read_to_string(backup.join(artifact.file_name().unwrap()))?,
@@ -3091,9 +3359,14 @@ mod tests {
         let legacy = legacy_root.join(LEGACY_DATABASE_NAME);
         std::fs::write(&legacy, b"original")?;
 
-        start_quarantine(&legacy, &data_directory, "unowned-backup", Some(1))
-            .await
-            .expect_err("quarantine crash was not injected");
+        start_quarantine(
+            &legacy,
+            &data_directory,
+            "unowned-backup",
+            Some(OPAQUE_DESTINATION_DURABLE_STAGE),
+        )
+        .await
+        .expect_err("quarantine crash was not injected");
         std::fs::write(&legacy, b"replacement")?;
 
         recover_quarantines(&legacy_root, &data_directory).await?;
@@ -3128,7 +3401,10 @@ mod tests {
         let error = Database::open_account(directory.path(), directory.path(), "stable-subject-a")
             .await
             .expect_err("busy legacy cache was moved");
-        assert!(format!("{error:#}").contains("cache is busy"));
+        assert!(
+            format!("{error:#}").contains("cache is busy"),
+            "unexpected error: {error:#}"
+        );
         assert!(directory.path().join(LEGACY_DATABASE_NAME).is_file());
         assert!(
             backup_directories(
