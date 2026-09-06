@@ -773,11 +773,12 @@ fn handle_composing_keys(key: &KeyEvent, app: &App, ui_state: &mut ui::UIState) 
 // ---------------------------------------------------------------------------
 
 async fn open_verified_cache(
-    directory: &Path,
+    data_root: &Path,
+    legacy_root: &Path,
     profile: anyhow::Result<models::AccountProfile>,
 ) -> anyhow::Result<db::AccountOpen> {
     let profile = profile?;
-    db::Database::open_account(directory, &profile.account_subject).await
+    db::Database::open_account(data_root, legacy_root, &profile.account_subject).await
 }
 
 #[allow(clippy::print_stdout)]
@@ -792,6 +793,13 @@ async fn main() -> anyhow::Result<()> {
         println!("Token cleared. Please restart without --reset-token to re-authenticate.");
         return Ok(());
     }
+
+    // Plan 016 will centralize the remaining runtime paths; only durable account data moves now.
+    let data_root = directories::BaseDirs::new()
+        .context("failed to locate the user application data directory")?
+        .data_local_dir()
+        .to_path_buf();
+    let legacy_root = std::env::current_dir().context("failed to locate the legacy cache root")?;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -862,7 +870,8 @@ async fn main() -> anyhow::Result<()> {
 
             let client = GmailClient::new(hub);
             let opened = open_verified_cache(
-                Path::new("."),
+                &data_root,
+                &legacy_root,
                 client.account_profile(account_subject).await,
             )
             .await?;
@@ -1014,6 +1023,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
 
         let result = open_verified_cache(
+            directory.path(),
             directory.path(),
             Err(anyhow::anyhow!("fake profile failure")),
         )
